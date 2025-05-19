@@ -1,17 +1,17 @@
 {
   "images" : [
     {
-      "filename" : "DollarsSenseLogo.png",
+      "filename" : "DollarsSenseLogo_Transparent 2.png",
       "idiom" : "universal",
       "scale" : "1x"
     },
     {
-      "filename" : "DollarsSenseLogo 1.png",
+      "filename" : "DollarsSenseLogo_Transparent 1.png",
       "idiom" : "universal",
       "scale" : "2x"
     },
     {
-      "filename" : "DollarsSenseLogo 2.png",
+      "filename" : "DollarsSenseLogo_Transparent.png",
       "idiom" : "universal",
       "scale" : "3x"
     }
