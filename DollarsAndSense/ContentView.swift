@@ -337,19 +337,61 @@ struct ContentView: View {
         return searched.sorted(using: sortOrder)
     }
 
+    // Category totals map for use in UI
+    private var categoryTotalMap: [String: Double] {
+        Dictionary(grouping: transactions, by: { $0.category })
+            .mapValues { txs in txs.map { abs($0.amount) }.reduce(0, +) }
+    }
+
     @State private var sortOrder: [KeyPathComparator<Transaction>] = [ .init(\.date, order: .reverse) ]
 
     var body: some View {
         VStack {
-            if let selected = selectedCategory {
-                Text("Showing: \(selected)")
-                    .font(.headline)
-                    .padding(.bottom, 4)
-            }
-
             chartSection
             Spacer().frame(height: 8)
-            transactionSection
+            VStack(spacing: 0) {
+                // Moved selected category block here
+                if let selected = selectedCategory,
+                   let total = categoryTotalMap[selected] {
+                    HStack(spacing: 10) {
+                        Text("Showing: \(selected)")
+                            .font(.headline)
+
+                        Text("Total: \(total, format: .currency(code: "USD"))")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+
+                        let overall = transactions.map { abs($0.amount) }.reduce(0, +)
+                        let percentage = (overall > 0) ? (total / overall) * 100 : 0
+                        Text("(\(percentage, specifier: "%.1f")%)")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+
+                        Button {
+                            selectedCategory = nil
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Clear category selection")
+                    }
+                    .padding(.bottom, 4)
+                }
+
+                // Search Field
+                TextField("Search transactions...", text: $searchText)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .focused($isSearchFieldFocused)
+                    .overlay(searchFieldOverlay)
+                    .padding(.horizontal)
+
+                // Transactions List
+                transactionListView
+
+                // Button bar
+                transactionControlsBar
+            }
         }
         .fileImporter(
             isPresented: $showingImporter,
@@ -522,22 +564,7 @@ struct ContentView: View {
         )
     }
     // MARK: - Transaction Section
-    private var transactionSection: some View {
-        VStack(spacing: 0) {
-            // Search Field
-            TextField("Search transactions...", text: $searchText)
-                .textFieldStyle(RoundedBorderTextFieldStyle())
-                .focused($isSearchFieldFocused)
-                .overlay(searchFieldOverlay)
-                .padding(.horizontal)
-
-            // Transactions List
-            transactionListView
-
-            // Button bar
-            transactionControlsBar
-        }
-    }
+    // transactionSection is now inlined in body to allow for selected category block placement
 
 
     // MARK: - Buttons and Controls Bar (previously in body)
