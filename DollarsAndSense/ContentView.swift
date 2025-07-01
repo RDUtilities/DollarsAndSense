@@ -5,6 +5,7 @@ import Charts
 import SwiftData
 import UniformTypeIdentifiers
 import Foundation
+import SwiftCSV
 
 // MARK: - KeychainHelper for Secure API Key Storage
 import Security
@@ -188,6 +189,9 @@ struct ContentView: View {
     @State private var showingAddCategorySheet = false
     @State private var newCategoryInput = ""
     @State private var transactionPendingNewCategory: Transaction?
+    // Import error reporting
+    @State private var importErrors: [String] = []
+    @State private var showingImportErrorSheet = false
 
     private func colorForCategory(_ category: String) -> Color {
         let hash = abs(category.hashValue)
@@ -468,6 +472,30 @@ struct ContentView: View {
             .padding()
             .frame(width: 300)
         }
+        .sheet(isPresented: $showingImportErrorSheet) {
+            VStack(alignment: .leading) {
+                Text("Import Issues")
+                    .font(.headline)
+                    .padding(.bottom, 10)
+
+                ScrollView {
+                    ForEach(importErrors, id: \.self) { error in
+                        Text("• \(error)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.bottom, 2)
+                    }
+                }
+
+                Button("Close") {
+                    showingImportErrorSheet = false
+                    importErrors.removeAll()
+                }
+                .padding(.top)
+            }
+            .padding()
+            .frame(width: 500, height: 300)
+        }
     }
 
     // MARK: - Chart Section (Pie/Weekly)
@@ -642,7 +670,7 @@ struct ContentView: View {
 
     // MARK: - Refactored transaction list view
     private var transactionListView: some View {
-        Table(filteredTransactions, sortOrder: $sortOrder) {
+        Table(of: Transaction.self, sortOrder: $sortOrder) {
             TableColumn("Date", value: \.date) { tx in
                 Text(tx.date.formatted(date: .abbreviated, time: .omitted))
                     .frame(minWidth: 100, alignment: .leading)
@@ -686,6 +714,10 @@ struct ContentView: View {
                         .frame(minWidth: 80, alignment: .leading)
                 }
             }
+        } rows: {
+            ForEach(filteredTransactions) { tx in
+                TableRow(tx)
+            }
         }
         .onChange(of: sortOrder) { newOrder in
             // Optional: Handle custom sorting side-effects here
@@ -693,123 +725,90 @@ struct ContentView: View {
     }
 
     private func importCSV(from url: URL) {
-        guard url.startAccessingSecurityScopedResource() else {
-            print("Couldn't access file due to sandboxing.")
-            return
-        }
-        defer { url.stopAccessingSecurityScopedResource() }
-
         do {
-            let content = try String(contentsOf: url)
-            let rows = content.components(separatedBy: "\n")
-            guard rows.count > 1 else { return }
+            guard let data = try? Data(contentsOf: url),
+                  let content = String(data: data, encoding: .utf8) else {
+                print("❌ Failed to read CSV data from URL")
+                return
+            }
 
-            let dateFormatters: [DateFormatter] = {
-                let formats = ["yyyy-MM-dd", "M/d/yy", "M/d/yyyy", "MM/dd/yyyy"]
-                return formats.map {
-                    let df = DateFormatter()
-                    df.dateFormat = $0
-                    df.locale = Locale(identifier: "en_US_POSIX")
-                    return df
-                }
-            }()
+            // Detect delimiter: prefer tab if more common, else fallback to comma
+            let tabCount = content.components(separatedBy: "\n").first?.components(separatedBy: "\t").count ?? 0
+            let commaCount = content.components(separatedBy: "\n").first?.components(separatedBy: ",").count ?? 0
+            let delimiter = tabCount > commaCount ? "\t" : ","
+            print("📄 Detected delimiter: '\(delimiter == "\t" ? "\\t" : ",")'")
 
-            var importedCount = 0
+            let delimiterChar = delimiter.first ?? ","
+            let csv = try CSV<Named>(string: content, delimiter: CSVDelimiter(unicodeScalarLiteral: delimiterChar))
+            // var importedItems: [Transaction] = []
+            var errors: [String] = []
 
-            for row in rows.dropFirst() where !row.trimmingCharacters(in: .whitespaces).isEmpty {
-                let columns = row.components(separatedBy: ",").map {
-                    $0.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\"", with: "")
-                }
+            for (index, row) in csv.rows.enumerated() {
+                print("🔍 Processing row \(index): \(row)")
+                let dateString = row["Processed Date"] ?? ""
+                let details = row["Description"] ?? ""
+                let type = (row["Credit or Debit"] ?? "").lowercased()
+                let amountString = row["Amount"] ?? ""
 
-                guard columns.count >= 6 else {
-                    print("⚠️ Skipping malformed row (expected 6+ columns): \(columns)")
+                if dateString.isEmpty || amountString.isEmpty {
+                    errors.append("❗️ Missing required fields in row \(index): \(row)")
                     continue
                 }
 
-                // Bank export format:
-                // columns[0] = Account (skip)
-                // columns[1] = Processed Date
-                // columns[2] = Description
-                // columns[3] = Check Number (skip)
-                // columns[4] = Credit or Debit
-                // columns[5] = Amount
-
-                let dateString = columns[1] // Processed Date
-                let details = columns[2]    // Description
-                let creditOrDebit = columns[4].lowercased() // Credit or Debit
-                let amountString = columns[5] // Amount
-                let category = "" // Leave blank to allow classification or set to Uncategorized
-
-                guard let date = dateFormatters.compactMap({ $0.date(from: dateString) }).first else {
-                    print("⚠️ Failed to parse date: \(dateString)")
+                let dateFormatter = DateFormatter()
+                dateFormatter.dateFormat = "yyyy-MM-dd"
+                guard let date = dateFormatter.date(from: dateString) else {
+                    errors.append("❗️ Invalid date format in row \(index): \(dateString)")
                     continue
                 }
 
                 guard let amount = Double(amountString) else {
-                    print("⚠️ Failed to parse amount: \(amountString)")
+                    errors.append("❗️ Invalid amount format in row \(index): \(amountString)")
                     continue
                 }
 
-                // Treat anything that isn't explicitly "debit" as income (credit)
-                let isDebit = creditOrDebit == "debit"
-                let signedAmount = isDebit ? -abs(amount) : abs(amount)
-
-                if category.isEmpty {
-                    if preferencesModel.testMode {
-                        let transaction = Transaction(
-                            date: date,
-                            details: details,
-                            amount: signedAmount,
-                            category: "Uncategorized",
-                            source: .unknown
-                        )
-                        modelContext.insert(transaction)
-                        transactions.append(transaction)
-                    } else {
-                        classifyCategory(for: details) { predictedCategory in
-                            DispatchQueue.main.async {
-                                let finalCategory = predictedCategory ?? "Uncategorized"
-                                categorySuggestions[details] = finalCategory
-                                let transaction = Transaction(
-                                    date: date,
-                                    details: details,
-                                    amount: signedAmount,
-                                    category: finalCategory,
-                                    source: .ai
-                                )
-                                modelContext.insert(transaction)
-                                transactions.append(transaction)
-                                preferencesModel.estimatedCost += 0.0002
-                            }
+                let signedAmount = type.contains("debit") ? -amount : amount
+                let newTransaction = Transaction(date: date, details: details, amount: signedAmount, category: "Uncategorized")
+                classifyCategory(for: details) { category in
+                    DispatchQueue.main.async {
+                        if let category = category, !category.isEmpty {
+                            newTransaction.category = category
+                            newTransaction.source = .ai
+                            categorySuggestions[details] = category
+                        }
+                        modelContext.insert(newTransaction)
+                        self.transactions.append(newTransaction)
+                        do {
+                            try modelContext.save()
+                        } catch {
+                            errors.append("❗️ Failed to save transaction: \(error.localizedDescription)")
                         }
                     }
-                } else {
-                    let transaction = Transaction(
-                        date: date,
-                        details: details,
-                        amount: signedAmount,
-                        category: category,
-                        source: .user
-                    )
-                    modelContext.insert(transaction)
-                    transactions.append(transaction)
                 }
-
-                importedCount += 1
             }
 
+            // The following lines are now redundant and removed/commented out:
+            /*
+            for tx in importedItems {
+                modelContext.insert(tx)
+            }
             do {
                 try modelContext.save()
             } catch {
-                print("💥 Failed to save transactions: \(error.localizedDescription)")
+                errors.append("❗️ Failed to save transactions: \(error.localizedDescription)")
+            }
+            self.transactions.append(contentsOf: importedItems)
+            */
+
+            if !errors.isEmpty {
+                self.importErrors = errors
+                self.showingImportErrorSheet = true
+            } else {
+                print("✅ Successfully imported transactions.")
             }
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                loadTransactions()
-                print("📊 Reloaded transactions after import")
-            }
         } catch {
-            print("Failed to parse CSV: \(error.localizedDescription)")
+            print("❌ CSV parsing failed: \(error.localizedDescription)")
         }
     }
 
@@ -1122,3 +1121,4 @@ private extension ContentView {
         searchField
     }
 }
+
