@@ -9,20 +9,30 @@ struct HelpView: View {
                 Text("Using AI-Powered Categorization")
                     .font(.title2).bold()
 
-                Text("This app can automatically categorize your transactions using OpenAI's GPT model. To use this feature:")
+                Text("This app can automatically categorize transactions with OpenAI models. To use this feature:")
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("1. Go to \"File > Preferences\".")
                     Text("2. Toggle off Test Mode if you'd like to make real API calls.")
                     Text("3. Paste in your OpenAI API key. You can get one at:")
-                        + Text(" https://platform.openai.com/account/api-keys").foregroundColor(.blue)
+                        + Text(" https://platform.openai.com/api-keys").foregroundColor(.blue)
                     Text("4. Click \"Test API Key\" to verify it.")
+                    Text("5. When importing CSV, choose your model mode:")
+                    Text("   • Fast & Cheap: gpt-4o-mini")
+                    Text("   • Higher Accuracy: gpt-4.1-mini")
+                    Text("   • Hybrid: 4o-mini first, 4.1-mini fallback")
                 }
 
                 Text("💡 TIP: In Test Mode, the app will not contact OpenAI. This is good for experimenting.")
 
                 Text("💰 Estimated Cost:")
-                Text("Each classification costs about $0.0002 using GPT-3.5. For 1,000 transactions, the total cost would be around $0.20.")
+                Text("Pricing used by this app:")
+                Text("• gpt-4o-mini: $0.15 / 1M input tokens, $0.60 / 1M output tokens")
+                Text("• gpt-4.1-mini: $0.40 / 1M input tokens, $1.60 / 1M output tokens")
+                Text("The app tracks token usage and estimates actual cost during imports.")
+                Text("Help copy version: RC3 model selector update (Feb 2026)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 Text("🔒 Privacy:")
                 Text("Your API key is stored securely in your local Keychain and is never sent anywhere else.")

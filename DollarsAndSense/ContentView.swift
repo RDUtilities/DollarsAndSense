@@ -87,81 +87,125 @@ struct SpendingByCategoryChart: View {
     @Binding var hoveredCategory: String?
     @Environment(\.colorScheme) private var colorScheme
 
+    private var spendingTransactions: [Transaction] {
+        transactions.filter { $0.amount < 0 }
+    }
+
     var categoryTotals: [(category: String, total: Double)] {
-        let grouped = Dictionary(grouping: transactions, by: { $0.category })
+        let grouped = Dictionary(grouping: spendingTransactions, by: { $0.category })
         return grouped.map { (category, txs) in
             (category, txs.map { abs($0.amount) }.reduce(0, +))
         }
+        .sorted { $0.total > $1.total }
+    }
+
+    private var overallTotal: Double {
+        categoryTotals.map(\.total).reduce(0, +)
+    }
+
+    private var activeCategory: String? {
+        selectedCategory ?? hoveredCategory
+    }
+
+    private var activeItem: (category: String, total: Double)? {
+        guard let activeCategory else { return nil }
+        return categoryTotals.first(where: { $0.category == activeCategory })
     }
 
     var body: some View {
-        HStack(alignment: .top) {
-            HStack(alignment: .top) {
-                Chart(content: chartContent)
-                    .chartLegend(.hidden)
-                    .frame(width: 300, height: 300)
-                    .padding(.top, 40)
-                    .padding(.leading)
-                    .overlay(alignment: .topLeading) {
-                        if let hovered = hoveredCategory,
-                           let hoveredItem = categoryTotals.first(where: { $0.category == hovered }) {
-                            let hash = abs(hoveredItem.category.hashValue)
-                            let hue = Double(hash % 360) / 360.0
-                            let color = Color(hue: hue, saturation: 0.6, brightness: colorScheme == .dark ? 0.7 : 0.9)
+        ZStack {
+            Chart(content: chartContent)
+                .chartLegend(.hidden)
+                .frame(width: 300, height: 300)
+                .padding(.top, 40)
+                .padding(.leading)
+                .animation(.easeInOut(duration: 0.22), value: selectedCategory)
+                .animation(.easeInOut(duration: 0.12), value: hoveredCategory)
 
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(hoveredItem.category)
-                                    .font(.caption)
-                                    .bold()
-                                Text("$\(hoveredItem.total, specifier: "%.2f") total")
-                                    .font(.caption2)
-                            }
-                            .padding(8)
-                            .background(Color(NSColor.controlBackgroundColor).opacity(0.95))
-                            .cornerRadius(6)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(color, lineWidth: 1)
-                            )
-                            .shadow(radius: 4)
-                            .offset(x: 0, y: -20) // new positioning
-                        }
-                    }
-            }
+            centerSummaryCard
         }
         .padding()
+    }
+
+    private var centerSummaryCard: some View {
+        VStack(spacing: 4) {
+            if let activeItem {
+                let percent = overallTotal > 0 ? (activeItem.total / overallTotal) * 100 : 0
+                Text(activeItem.category)
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .lineLimit(1)
+                Text(activeItem.total, format: .currency(code: "USD"))
+                    .font(.headline)
+                    .fontWeight(.bold)
+                Text("\(percent, specifier: "%.1f")% of total")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            } else {
+                Text("Total Spend")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text(overallTotal, format: .currency(code: "USD"))
+                    .font(.headline)
+                    .fontWeight(.bold)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.gray.opacity(0.25), lineWidth: 1)
+        )
+        .frame(width: 145)
+        .offset(x: 10, y: 18)
+    }
+
+    private func colorForCategory(_ category: String) -> Color {
+        let hash = abs(category.hashValue)
+        let hue = Double(hash % 360) / 360.0
+        return Color(hue: hue, saturation: 0.68, brightness: colorScheme == .dark ? 0.74 : 0.9)
+    }
+
+    private func styleForCategory(_ category: String) -> AnyShapeStyle {
+        let baseColor = colorForCategory(category)
+        let isSelected = selectedCategory == category
+        let isHovered = hoveredCategory == category
+        let isFocused = isSelected || isHovered
+
+        if selectedCategory != nil && !isSelected {
+            return AnyShapeStyle(Color.gray.opacity(0.24))
+        }
+
+        if isFocused {
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [baseColor.opacity(0.98), baseColor.opacity(0.78)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+        }
+
+        return AnyShapeStyle(baseColor)
     }
 
     @ChartContentBuilder
     private func chartContent() -> some ChartContent {
         ForEach(categoryTotals, id: \.category) { item in
-            let hash = abs(item.category.hashValue)
-            let hue = Double(hash % 360) / 360.0
-            let baseColor = Color(hue: hue, saturation: 0.7, brightness: colorScheme == .dark ? 0.7 : 0.9)
-            // Determine if this slice is selected or hovered
             let isSelected = selectedCategory == item.category
             let isHovered = hoveredCategory == item.category
-            let isHighlighted = isSelected || isHovered
-            let style = (selectedCategory == nil || isSelected)
-                ? AnyShapeStyle(baseColor)
-                : AnyShapeStyle(Color.gray.opacity(0.3))
+            let isFocused = isSelected || isHovered
 
             SectorMark(
                 angle: .value("Total", item.total),
-                innerRadius: .ratio(0.5),
-                angularInset: 1
+                innerRadius: .ratio(0.56),
+                outerRadius: .ratio(isFocused ? 1.0 : 0.96),
+                angularInset: isFocused ? 2.0 : 1.1
             )
-            .offset(
-                x: isHighlighted ? 12 : 0,
-                y: isHighlighted ? -12 : 0
-            )
-            .shadow(color: isHighlighted ? baseColor.opacity(0.4) : .clear, radius: 6)
-            .foregroundStyle(
-                // Highlight with stronger color if hovered
-                isHovered
-                ? AnyShapeStyle(baseColor.opacity(0.8))
-                : style
-            )
+            .foregroundStyle(styleForCategory(item.category))
+            .opacity(selectedCategory == nil || isSelected ? 1.0 : 0.42)
+            .cornerRadius(isFocused ? 3 : 0)
         }
     }
 }
@@ -354,7 +398,7 @@ struct ContentView: View {
 
     // Category totals map for use in UI
     private var categoryTotalMap: [String: Double] {
-        Dictionary(grouping: transactions, by: { $0.category })
+        Dictionary(grouping: transactions.filter { $0.amount < 0 }, by: { $0.category })
             .mapValues { txs in txs.map { abs($0.amount) }.reduce(0, +) }
     }
 
@@ -376,7 +420,7 @@ struct ContentView: View {
                             .font(.subheadline)
                             .foregroundColor(.secondary)
 
-                        let overall = transactions.map { abs($0.amount) }.reduce(0, +)
+                        let overall = transactions.filter { $0.amount < 0 }.map { abs($0.amount) }.reduce(0, +)
                         let percentage = (overall > 0) ? (total / overall) * 100 : 0
                         Text("(\(percentage, specifier: "%.1f")%)")
                             .font(.caption)
@@ -532,7 +576,7 @@ struct ContentView: View {
 
     // MARK: - Pie Chart with Logo and Category Label Grid
     private var PieChartWithCategoriesView: some View {
-        HStack(alignment: .top, spacing: 40) {
+        HStack(alignment: .top, spacing: 24) {
             SpendingByCategoryChart(
                 transactions: transactions,
                 selectedCategory: $selectedCategory,
@@ -541,26 +585,22 @@ struct ContentView: View {
             .frame(width: 300, height: 300)
 
             categoryLabelGrid
-                .frame(minWidth: 400)
-
-            Spacer()
+                .frame(minWidth: 560, maxWidth: 700)
 
             if colorScheme == .dark {
                 Image("LogoWhiteBackground")
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 400, height: 400)
-                    .padding(.trailing)
+                    .frame(width: 320, height: 320)
             } else {
                 Image("LogoTransparent")
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 400, height: 400)
-                    .padding(.trailing)
+                    .frame(width: 320, height: 320)
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
-        .padding(.horizontal)
+        .padding(.horizontal, 16)
         .padding(.top, 50)
         .padding(.bottom, 30)
     }
@@ -569,38 +609,46 @@ struct ContentView: View {
     // MARK: - Category Label Grid (for Pie chart)
     @Environment(\.colorScheme) private var colorScheme
     private var categoryLabelGrid: some View {
-        let grouped = Dictionary(grouping: transactions, by: { $0.category })
+        let grouped = Dictionary(grouping: transactions.filter { $0.amount < 0 }, by: { $0.category })
         let categoryTotals = grouped.map { (category, txs) in
             (category, txs.map { abs($0.amount) }.reduce(0, +))
         }
-        let sortedCategories = categoryTotals.sorted {
-            $0.0.localizedCaseInsensitiveCompare($1.0) == .orderedAscending
-        }
+        let overallTotal = categoryTotals.map(\.1).reduce(0, +)
+        let sortedCategories = categoryTotals.sorted { $0.1 > $1.1 }
         let columns = [
-            GridItem(.flexible(minimum: 80), spacing: 2),
-            GridItem(.flexible(minimum: 80), spacing: 2),
-            GridItem(.flexible(minimum: 80), spacing: 2)
+            GridItem(.flexible(minimum: 130), spacing: 6),
+            GridItem(.flexible(minimum: 130), spacing: 6),
+            GridItem(.flexible(minimum: 130), spacing: 6),
+            GridItem(.flexible(minimum: 130), spacing: 6)
         ]
-        return LazyVGrid(columns: columns, spacing: 2) {
+        return LazyVGrid(columns: columns, spacing: 6) {
             ForEach(sortedCategories, id: \.0) { item in
                 let isSelected = selectedCategory == item.0
                 let hash = abs(item.0.hashValue)
                 let hue = Double(hash % 360) / 360.0
-                let color = Color(hue: hue, saturation: 0.6, brightness: colorScheme == .dark ? 0.7 : 0.9)
-                Text(item.0)
-                    .font(.caption)
-                    .fontWeight(isSelected ? .bold : .regular)
+                let color = Color(hue: hue, saturation: 0.66, brightness: colorScheme == .dark ? 0.72 : 0.9)
+                let percent = overallTotal > 0 ? (item.1 / overallTotal) * 100 : 0
+                VStack(spacing: 2) {
+                    Text(item.0)
+                        .font(.caption)
+                        .fontWeight(isSelected ? .bold : .semibold)
+                        .lineLimit(1)
+                    Text("\(percent, specifier: "%.1f")%")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
                     .foregroundColor(isSelected ? color : .primary)
-                    .frame(maxWidth: .infinity, minHeight: 30)
+                    .frame(maxWidth: .infinity, minHeight: 42)
                     .background(
                         (hoveredCategory == item.0 || isSelected)
-                        ? color.opacity(0.2)
-                        : Color(NSColor.textBackgroundColor)
+                        ? color.opacity(0.18)
+                        : Color(NSColor.textBackgroundColor).opacity(0.75)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 0)
-                            .stroke(Color.gray.opacity(0.3), lineWidth: 0.5)
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(isSelected ? color.opacity(0.9) : Color.gray.opacity(0.22), lineWidth: isSelected ? 1.4 : 0.7)
                     )
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
                     .onHover { hovering in
                         hoveredCategory = hovering ? item.0 : nil
                     }
@@ -615,7 +663,7 @@ struct ContentView: View {
             }
         }
         .background(
-            colorScheme == .dark ? Color.black : Color.white
+            colorScheme == .dark ? Color.black.opacity(0.6) : Color.white
         )
     }
     // MARK: - Transaction Section
