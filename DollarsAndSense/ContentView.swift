@@ -67,14 +67,16 @@ final class Transaction: Identifiable {
     var amount: Double
     var category: String
     var source: CategorySource
+    var categorizedByModel: String?
 
-    init(date: Date, details: String, amount: Double, category: String, source: CategorySource = .unknown) {
+    init(date: Date, details: String, amount: Double, category: String, source: CategorySource = .unknown, categorizedByModel: String? = nil) {
         self.id = UUID()
         self.date = date
         self.details = details
         self.amount = amount
         self.category = category
         self.source = source
+        self.categorizedByModel = categorizedByModel
     }
 }
 
@@ -166,6 +168,12 @@ struct SpendingByCategoryChart: View {
 
 
 struct ContentView: View {
+    private enum ImportCategorizationMode {
+        case gpt4oMini
+        case gpt41Mini
+        case hybrid
+    }
+
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject var preferencesModel: AppPreferencesModel
     @State private var transactions: [Transaction] = []
@@ -192,6 +200,8 @@ struct ContentView: View {
     // Import error reporting
     @State private var importErrors: [String] = []
     @State private var showingImportErrorSheet = false
+    @State private var pendingImportURL: URL?
+    @State private var showingImportModelDialog = false
 
     private func colorForCategory(_ category: String) -> Color {
         let hash = abs(category.hashValue)
@@ -233,10 +243,10 @@ struct ContentView: View {
             }
 
             if preferencesModel.showSourceColumn {
-                Text(tx.source == .ai ? "AI" : tx.source == .user ? "User" : "")
+                Text(sourceLabel(for: tx))
                     .font(.caption2)
                     .foregroundColor(tx.source == .ai ? .blue : .gray)
-                    .frame(width: 80, alignment: .leading)
+                    .frame(width: 140, alignment: .leading)
             }
         }
         .background(hoveredCategory == tx.category ? colorForCategory(tx.category).opacity(0.1) : Color.clear)
@@ -307,6 +317,7 @@ struct ContentView: View {
                             if let index = transactions.firstIndex(where: { $0.id == tx.id }) {
                                 transactions[index].category = newValue
                                 transactions[index].source = .user
+                                transactions[index].categorizedByModel = nil
                                 categorySuggestions[transactions[index].details] = newValue
                                 try? modelContext.save()
                                 transactions = Array(transactions)
@@ -404,9 +415,24 @@ struct ContentView: View {
         ) { result in
             do {
                 guard let selectedFile = try result.get().first else { return }
-                importCSV(from: selectedFile)
+                pendingImportURL = selectedFile
+                showingImportModelDialog = true
             } catch {
                 print("Failed to read file: \(error.localizedDescription)")
+            }
+        }
+        .confirmationDialog("Choose AI Model For This Import", isPresented: $showingImportModelDialog, titleVisibility: .visible) {
+            Button("Fast & Cheap (gpt-4o-mini)") {
+                startImport(using: .gpt4oMini)
+            }
+            Button("Higher Accuracy (gpt-4.1-mini)") {
+                startImport(using: .gpt41Mini)
+            }
+            Button("Hybrid (4o-mini then 4.1-mini fallback)") {
+                startImport(using: .hybrid)
+            }
+            Button("Cancel", role: .cancel) {
+                pendingImportURL = nil
             }
         }
         .fileExporter(
@@ -458,6 +484,7 @@ struct ContentView: View {
                            let index = transactions.firstIndex(where: { $0.id == tx.id }) {
                             transactions[index].category = newCategoryInput
                             transactions[index].source = .user
+                            transactions[index].categorizedByModel = nil
                             categorySuggestions[transactions[index].details] = newCategoryInput
                             try? modelContext.save()
                             transactions = Array(transactions)
@@ -708,10 +735,10 @@ struct ContentView: View {
 
             if preferencesModel.showSourceColumn {
                 TableColumn("Source") { tx in
-                    Text(tx.source == .ai ? "AI" : tx.source == .user ? "User" : "")
+                    Text(sourceLabel(for: tx))
                         .font(.caption2)
                         .foregroundColor(tx.source == .ai ? .blue : .gray)
-                        .frame(minWidth: 80, alignment: .leading)
+                        .frame(minWidth: 140, alignment: .leading)
                 }
             }
         } rows: {
@@ -724,7 +751,13 @@ struct ContentView: View {
         }
     }
 
-    private func importCSV(from url: URL) {
+    private func startImport(using mode: ImportCategorizationMode) {
+        guard let url = pendingImportURL else { return }
+        pendingImportURL = nil
+        importCSV(from: url, using: mode)
+    }
+
+    private func importCSV(from url: URL, using mode: ImportCategorizationMode) {
         do {
             guard let data = try? Data(contentsOf: url),
                   let content = String(data: data, encoding: .utf8) else {
@@ -769,11 +802,12 @@ struct ContentView: View {
 
                 let signedAmount = type.contains("debit") ? -amount : amount
                 let newTransaction = Transaction(date: date, details: details, amount: signedAmount, category: "Uncategorized")
-                classifyCategory(for: details) { category in
+                classifyCategory(for: details, mode: mode) { category, modelUsed in
                     DispatchQueue.main.async {
                         if let category = category, !category.isEmpty {
                             newTransaction.category = category
                             newTransaction.source = .ai
+                            newTransaction.categorizedByModel = modelUsed
                             categorySuggestions[details] = category
                         }
                         modelContext.insert(newTransaction)
@@ -813,7 +847,47 @@ struct ContentView: View {
     }
 
     // MARK: - OpenAI Category Classification
-    private func classifyCategory(for description: String, completion: @escaping (String?) -> Void) {
+    private let categorySystemPrompt = "You are a financial assistant. Respond with only the spending category (e.g., Groceries, Restaurants, Gas, Digital Services, Shopping, etc.) based on the transaction description. Do not explain your answer."
+
+    private func modelPlan(for mode: ImportCategorizationMode) -> (primary: String, fallback: String?) {
+        switch mode {
+        case .gpt4oMini:
+            return ("gpt-4o-mini", nil)
+        case .gpt41Mini:
+            return ("gpt-4.1-mini", nil)
+        case .hybrid:
+            return ("gpt-4o-mini", "gpt-4.1-mini")
+        }
+    }
+
+    private func classifyCategory(for description: String, mode: ImportCategorizationMode, completion: @escaping (String?, String?) -> Void) {
+        if preferencesModel.testMode {
+            completion(nil, nil)
+            return
+        }
+
+        let plan = modelPlan(for: mode)
+        classifyCategoryWithModel(description: description, model: plan.primary) { primaryCategory in
+            guard
+                let fallbackModel = plan.fallback,
+                self.shouldEscalateToFallback(primaryCategory)
+            else {
+                completion(primaryCategory, plan.primary)
+                return
+            }
+
+            print("⚖️ Escalating to \(fallbackModel) for: \(description)")
+            self.classifyCategoryWithModel(description: description, model: fallbackModel) { fallbackCategory in
+                if let fallbackCategory, !fallbackCategory.isEmpty {
+                    completion(fallbackCategory, fallbackModel)
+                } else {
+                    completion(primaryCategory, plan.primary)
+                }
+            }
+        }
+    }
+
+    private func classifyCategoryWithModel(description: String, model: String, completion: @escaping (String?) -> Void) {
         let endpoint = URL(string: "https://api.openai.com/v1/chat/completions")!
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -827,11 +901,11 @@ struct ContentView: View {
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
 
         let messages = [
-            ["role": "system", "content": "You are a financial assistant. Respond with only the spending category (e.g., Groceries, Restaurants, Gas, Digital Services, Shopping, etc.) based on the transaction description. Do not explain your answer."],
+            ["role": "system", "content": categorySystemPrompt],
             ["role": "user", "content": "Transaction: \(description)"]
         ]
         let json: [String: Any] = [
-            "model": "gpt-3.5-turbo",
+            "model": model,
             "messages": messages,
             "temperature": 0.3
         ]
@@ -856,11 +930,20 @@ struct ContentView: View {
                    let choices = json["choices"] as? [[String: Any]],
                    let message = choices.first?["message"] as? [String: Any],
                    let content = message["content"] as? String {
-                    print("🧠 OpenAI Raw Response: \(content)")
-                    let cleaned = content
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                        .replacingOccurrences(of: "Category:", with: "", options: .caseInsensitive)
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    print("🧠 \(model) Raw Response: \(content)")
+                    let cleaned = cleanCategoryOutput(content)
+                    if let usage = json["usage"] as? [String: Any],
+                       let promptTokens = tokenCount(from: usage, keys: ["prompt_tokens", "input_tokens"]),
+                       let completionTokens = tokenCount(from: usage, keys: ["completion_tokens", "output_tokens"]) {
+                        updateEstimatedCost(promptTokens: promptTokens, completionTokens: completionTokens, model: model)
+                    } else {
+                        // Fallback in case usage metadata is missing from response.
+                        updateEstimatedCost(
+                            promptTokens: estimatedPromptTokens(for: description),
+                            completionTokens: estimatedCompletionTokens(for: cleaned),
+                            model: model
+                        )
+                    }
                     completion(cleaned)
                 } else {
                     completion(nil)
@@ -870,6 +953,92 @@ struct ContentView: View {
                 completion(nil)
             }
         }.resume()
+    }
+
+    private func updateEstimatedCost(promptTokens: Int, completionTokens: Int, model: String) {
+        let pricing = modelPricing(for: model)
+        let inputCost = (Double(promptTokens) / 1_000_000.0) * pricing.inputPerMillion
+        let outputCost = (Double(completionTokens) / 1_000_000.0) * pricing.outputPerMillion
+        let callCost = inputCost + outputCost
+        DispatchQueue.main.async {
+            self.preferencesModel.estimatedCost += callCost
+        }
+    }
+
+    private func tokenCount(from usage: [String: Any], keys: [String]) -> Int? {
+        for key in keys {
+            guard let raw = usage[key] else { continue }
+            if let value = raw as? Int { return value }
+            if let value = raw as? Double { return Int(value) }
+            if let value = raw as? String, let parsed = Int(value) { return parsed }
+        }
+        return nil
+    }
+
+    private func modelPricing(for model: String) -> (inputPerMillion: Double, outputPerMillion: Double) {
+        switch model {
+        case "gpt-4.1-mini":
+            return (0.40, 1.60)
+        case "gpt-4o-mini":
+            return (0.15, 0.60)
+        default:
+            return (0.15, 0.60)
+        }
+    }
+
+    private func estimatedPromptTokens(for description: String) -> Int {
+        let userPrompt = "Transaction: \(description)"
+        let contentChars = categorySystemPrompt.count + userPrompt.count
+        return Int(ceil(Double(contentChars) / 4.0)) + 16
+    }
+
+    private func estimatedCompletionTokens(for category: String) -> Int {
+        max(2, Int(ceil(Double(category.count) / 4.0)) + 1)
+    }
+
+    private func cleanCategoryOutput(_ raw: String) -> String {
+        raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "Category:", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "\"", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func shouldEscalateToFallback(_ category: String?) -> Bool {
+        guard let raw = category else { return true }
+        let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return true }
+
+        let lowered = cleaned.lowercased()
+        let ambiguousTerms = [
+            "uncategorized", "unknown", "other", "misc", "miscellaneous",
+            "n/a", "cannot determine", "can't determine", "not sure"
+        ]
+        if ambiguousTerms.contains(where: { lowered.contains($0) }) {
+            return true
+        }
+
+        if cleaned.contains("\n") || cleaned.contains(":") || cleaned.contains(".") {
+            return true
+        }
+
+        let wordCount = cleaned.split(whereSeparator: \.isWhitespace).count
+        if wordCount > 3 {
+            return true
+        }
+
+        return false
+    }
+
+    private func sourceLabel(for tx: Transaction) -> String {
+        switch tx.source {
+        case .ai:
+            return tx.categorizedByModel ?? "AI"
+        case .user:
+            return "User"
+        case .unknown:
+            return ""
+        }
     }
     // MARK: - Refresh stored API key from Keychain
     private func refreshStoredApiKey() {
@@ -934,7 +1103,7 @@ DemoAccount,2025-04-27,WITHDRAWAL ATM TX,,Debit,40.00
             ["role": "user", "content": "Say OK."]
         ]
         let json: [String: Any] = [
-            "model": "gpt-3.5-turbo",
+            "model": "gpt-4o-mini",
             "messages": messages,
             "temperature": 0
         ]
@@ -1024,8 +1193,9 @@ struct PreferencesView: View {
                     .font(.caption)
             }
 
-            Text(String(format: "Estimated OpenAI cost: $%.4f", preferencesModel.estimatedCost))
-                .font(.caption)
+            Text(String(format: "Estimated OpenAI cost: $%.6f", preferencesModel.estimatedCost))
+                .font(.headline)
+                .fontWeight(.semibold)
                 .foregroundColor(.gray)
 
             Spacer()
@@ -1044,7 +1214,7 @@ struct PreferencesView: View {
 
         let messages = [["role": "user", "content": "Say OK."]]
         let json: [String: Any] = [
-            "model": "gpt-3.5-turbo",
+            "model": "gpt-4o-mini",
             "messages": messages,
             "temperature": 0
         ]
@@ -1121,4 +1291,3 @@ private extension ContentView {
         searchField
     }
 }
-
