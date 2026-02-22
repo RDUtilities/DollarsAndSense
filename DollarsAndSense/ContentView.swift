@@ -246,6 +246,13 @@ struct ContentView: View {
     @State private var showingImportErrorSheet = false
     @State private var pendingImportURL: URL?
     @State private var showingImportModelDialog = false
+    @State private var selectedTransactionIDs: Set<UUID> = []
+    @State private var showingBulkAddCategorySheet = false
+    @State private var bulkNewCategoryInput = ""
+    @State private var showingSmartBulkSheet = false
+    @State private var smartBulkSourceCategoryFilter = "__any__"
+    @State private var smartBulkTargetCategorySelection = ""
+    @State private var smartBulkNewTargetCategoryInput = ""
 
     private func colorForCategory(_ category: String) -> Color {
         let hash = abs(category.hashValue)
@@ -571,6 +578,86 @@ struct ContentView: View {
             .padding()
             .frame(width: 500, height: 300)
         }
+        .sheet(isPresented: $showingBulkAddCategorySheet) {
+            VStack(spacing: 20) {
+                Text("Add New Category for Selected Rows")
+                    .font(.headline)
+
+                Text("\(selectedTransactionIDs.count) selected")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                TextField("Enter category name", text: $bulkNewCategoryInput)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .padding(.horizontal)
+
+                HStack {
+                    Button("Cancel") {
+                        showingBulkAddCategorySheet = false
+                        bulkNewCategoryInput = ""
+                    }
+
+                    Button("Apply") {
+                        applyCategoryToSelectedRows(bulkNewCategoryInput)
+                        showingBulkAddCategorySheet = false
+                        bulkNewCategoryInput = ""
+                    }
+                    .disabled(selectedTransactionIDs.isEmpty || bulkNewCategoryInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding()
+            .frame(width: 340)
+        }
+        .sheet(isPresented: $showingSmartBulkSheet) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Apply Category to Visible Rows")
+                    .font(.headline)
+
+                Text("Visible rows in table: \(filteredTransactions.count)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Picker("Only rows currently in", selection: $smartBulkSourceCategoryFilter) {
+                    Text("Any Category").tag("__any__")
+                    ForEach(visibleCategoryOptions, id: \.self) { category in
+                        Text(category).tag(category)
+                    }
+                }
+
+                Picker("Set category to", selection: $smartBulkTargetCategorySelection) {
+                    ForEach(availableCategories, id: \.self) { category in
+                        Text(category).tag(category)
+                    }
+                    Text("Add New...").tag("__add_new__")
+                }
+
+                if smartBulkTargetCategorySelection == "__add_new__" {
+                    TextField("New category name", text: $smartBulkNewTargetCategoryInput)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                }
+
+                Text("Will update \(smartBulkRowsToChangeCount) row(s)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                HStack {
+                    Button("Cancel") {
+                        showingSmartBulkSheet = false
+                    }
+
+                    Button("Apply") {
+                        let ids = Set(smartBulkCandidateTransactions.map(\.id))
+                        applyCategoryToTransactionIDs(ids, category: smartBulkResolvedTargetCategory)
+                        showingSmartBulkSheet = false
+                    }
+                    .disabled(smartBulkRowsToChangeCount == 0)
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding()
+            .frame(width: 420)
+        }
     }
 
     // MARK: - Chart Section (Pie/Weekly)
@@ -721,6 +808,39 @@ struct ContentView: View {
         .padding(.trailing, 10)
     }
 
+    private var bulkCategoryButton: some View {
+        Menu("Bulk Category (\(selectedTransactionIDs.count))") {
+            ForEach(availableCategories, id: \.self) { category in
+                Button(category) {
+                    applyCategoryToSelectedRows(category)
+                }
+            }
+
+            Divider()
+
+            Button("Add New Category...") {
+                bulkNewCategoryInput = ""
+                showingBulkAddCategorySheet = true
+            }
+        }
+        .disabled(selectedTransactionIDs.isEmpty)
+        .padding(.trailing, 10)
+    }
+
+    private var smartBulkButton: some View {
+        Button("Apply Category to Visible Rows...") {
+            openSmartBulkSheet()
+        }
+        .disabled(filteredTransactions.isEmpty)
+        .padding(.trailing, 10)
+    }
+
+    private var selectedRowsCountText: some View {
+        Text("\(selectedTransactionIDs.count) selected")
+            .foregroundColor(.secondary)
+            .padding(.trailing, 10)
+    }
+
     private var totalIncomeAmount: Double {
         searchFilteredTransactions
             .filter { $0.amount > 0 }
@@ -760,13 +880,40 @@ struct ContentView: View {
             .fontWeight(.bold)
     }
 
+    private var visibleCategoryOptions: [String] {
+        Array(Set(filteredTransactions.map { $0.category }))
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    private var smartBulkResolvedTargetCategory: String {
+        if smartBulkTargetCategorySelection == "__add_new__" {
+            return smartBulkNewTargetCategoryInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return smartBulkTargetCategorySelection
+    }
+
+    private var smartBulkCandidateTransactions: [Transaction] {
+        let visible = filteredTransactions
+        guard smartBulkSourceCategoryFilter != "__any__" else { return visible }
+        return visible.filter { $0.category == smartBulkSourceCategoryFilter }
+    }
+
+    private var smartBulkRowsToChangeCount: Int {
+        let target = smartBulkResolvedTargetCategory
+        guard !target.isEmpty else { return 0 }
+        return smartBulkCandidateTransactions.filter { $0.category != target }.count
+    }
+
     // MARK: - Refactored transaction controls bar
     private var transactionControlsBar: some View {
         HStack {
             importButton
             clearButton
             reCategorizeButton
+            bulkCategoryButton
+            smartBulkButton
             downloadTemplateButton
+            selectedRowsCountText
             Spacer()
             totalIncomeText
             totalSpendText
@@ -778,7 +925,7 @@ struct ContentView: View {
 
     // MARK: - Refactored transaction list view
     private var transactionListView: some View {
-        Table(of: Transaction.self, sortOrder: $sortOrder) {
+        Table(of: Transaction.self, selection: $selectedTransactionIDs, sortOrder: $sortOrder) {
             TableColumn("Date", value: \.date) { tx in
                 Text(tx.date.formatted(date: .abbreviated, time: .omitted))
                     .frame(minWidth: 100, alignment: .leading)
@@ -1145,7 +1292,47 @@ struct ContentView: View {
             }
             try? modelContext.save()
             transactions.removeAll()
+            selectedTransactionIDs.removeAll()
         }
+    }
+
+    private var availableCategories: [String] {
+        Array(Set(transactions.map { $0.category }))
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    private func applyCategoryToTransactionIDs(_ ids: Set<UUID>, category: String) {
+        let trimmed = category.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !ids.isEmpty else { return }
+
+        var changed = false
+        for index in transactions.indices where ids.contains(transactions[index].id) {
+            transactions[index].category = trimmed
+            transactions[index].source = .user
+            transactions[index].categorizedByModel = nil
+            categorySuggestions[transactions[index].details] = trimmed
+            changed = true
+        }
+
+        guard changed else { return }
+
+        do {
+            try modelContext.save()
+        } catch {
+            print("❌ Failed to save bulk category update: \(error.localizedDescription)")
+        }
+        transactions = Array(transactions)
+    }
+
+    private func applyCategoryToSelectedRows(_ category: String) {
+        applyCategoryToTransactionIDs(selectedTransactionIDs, category: category)
+    }
+
+    private func openSmartBulkSheet() {
+        smartBulkSourceCategoryFilter = "__any__"
+        smartBulkTargetCategorySelection = availableCategories.first ?? "__add_new__"
+        smartBulkNewTargetCategoryInput = ""
+        showingSmartBulkSheet = true
     }
 
     private func generateCSVTemplate() {
