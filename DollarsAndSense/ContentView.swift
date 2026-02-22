@@ -380,12 +380,8 @@ struct ContentView: View {
         }
     }
 
-    var filteredTransactions: [Transaction] {
-        let base = selectedCategory == nil
-            ? transactions
-            : transactions.filter { $0.category == selectedCategory }
-
-        let searched = searchText.isEmpty ? base : base.filter {
+    private var searchFilteredTransactions: [Transaction] {
+        let searched = searchText.isEmpty ? transactions : transactions.filter {
             let dateString = $0.date.formatted(date: .abbreviated, time: .omitted)
             return $0.details.localizedCaseInsensitiveContains(searchText) ||
                    $0.category.localizedCaseInsensitiveContains(searchText) ||
@@ -394,6 +390,14 @@ struct ContentView: View {
         }
 
         return searched.sorted(using: sortOrder)
+    }
+
+    var filteredTransactions: [Transaction] {
+        let base = searchFilteredTransactions
+        let categoryFiltered = selectedCategory == nil
+            ? base
+            : base.filter { $0.category == selectedCategory }
+        return categoryFiltered.sorted(using: sortOrder)
     }
 
     // Category totals map for use in UI
@@ -717,14 +721,42 @@ struct ContentView: View {
         .padding(.trailing, 10)
     }
 
-    private var incomeText: some View {
-        Text("Income: \(filteredTransactions.filter { $0.category.lowercased() == "income" }.map { $0.amount }.reduce(0, +), format: .currency(code: "USD"))")
+    private var totalIncomeAmount: Double {
+        searchFilteredTransactions
+            .filter { $0.amount > 0 }
+            .map(\.amount)
+            .reduce(0, +)
+    }
+
+    private var totalSpendAmount: Double {
+        searchFilteredTransactions
+            .filter { $0.amount < 0 }
+            .map { abs($0.amount) }
+            .reduce(0, +)
+    }
+
+    private var selectedCategoryTotalAmount: Double {
+        guard selectedCategory != nil else { return 0 }
+        return filteredTransactions
+            .filter { $0.amount < 0 }
+            .map { abs($0.amount) }
+            .reduce(0, +)
+    }
+
+    private var totalIncomeText: some View {
+        Text("Total Income: \(totalIncomeAmount, format: .currency(code: "USD"))")
             .fontWeight(.bold)
             .padding(.trailing, 10)
     }
 
-    private var totalText: some View {
-        Text("Total: \(filteredTransactions.map { $0.amount }.reduce(0, +), format: .currency(code: "USD"))")
+    private var totalSpendText: some View {
+        Text("Total Spend: \(totalSpendAmount, format: .currency(code: "USD"))")
+            .fontWeight(.bold)
+            .padding(.trailing, 10)
+    }
+
+    private var selectedCategoryTotalText: some View {
+        Text("Selected Category Total: \(selectedCategoryTotalAmount, format: .currency(code: "USD"))")
             .fontWeight(.bold)
     }
 
@@ -736,8 +768,9 @@ struct ContentView: View {
             reCategorizeButton
             downloadTemplateButton
             Spacer()
-            incomeText
-            totalText
+            totalIncomeText
+            totalSpendText
+            selectedCategoryTotalText
         }
         .padding()
     }
