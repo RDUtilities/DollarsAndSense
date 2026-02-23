@@ -217,6 +217,17 @@ struct ContentView: View {
         case gpt41Mini
         case hybrid
     }
+    
+    private enum SmartBulkScope: String {
+        case visibleRows
+        case similarToSelectedRow
+    }
+    
+    private enum SmartBulkSimilarMatchMode: String {
+        case exact
+        case startsWith
+        case contains
+    }
 
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject var preferencesModel: AppPreferencesModel
@@ -250,6 +261,9 @@ struct ContentView: View {
     @State private var showingBulkAddCategorySheet = false
     @State private var bulkNewCategoryInput = ""
     @State private var showingSmartBulkSheet = false
+    @State private var smartBulkScope: SmartBulkScope = .visibleRows
+    @State private var smartBulkSimilarMatchMode: SmartBulkSimilarMatchMode = .exact
+    @State private var smartBulkSimilarMatchText = ""
     @State private var smartBulkSourceCategoryFilter = "__any__"
     @State private var smartBulkTargetCategorySelection = ""
     @State private var smartBulkNewTargetCategoryInput = ""
@@ -611,16 +625,52 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingSmartBulkSheet) {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Apply Category to Visible Rows")
+                Text("Smart Bulk Categorize")
                     .font(.headline)
+
+                Picker("Scope", selection: $smartBulkScope) {
+                    Text("Visible Rows").tag(SmartBulkScope.visibleRows)
+                    Text("Similar Rows as Selected Row").tag(SmartBulkScope.similarToSelectedRow)
+                }
 
                 Text("Visible rows in table: \(filteredTransactions.count)")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
+                if smartBulkScope == .similarToSelectedRow {
+                    if selectedTransactionIDs.count != 1 {
+                        Text("Select exactly 1 row to use Similar Rows mode.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else if smartBulkReferenceMerchantKey.isEmpty {
+                        Text("Could not derive a merchant key from the selected row.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("Matching merchant key: \(smartBulkReferenceMerchantKey)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    Picker("Match logic", selection: $smartBulkSimilarMatchMode) {
+                        Text("Exact").tag(SmartBulkSimilarMatchMode.exact)
+                        Text("Starts With").tag(SmartBulkSimilarMatchMode.startsWith)
+                        Text("Contains").tag(SmartBulkSimilarMatchMode.contains)
+                    }
+
+                    TextField("Match text (ex: AMAZON)", text: $smartBulkSimilarMatchText)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+
+                    if !smartBulkNormalizedSimilarMatchText.isEmpty {
+                        Text("Normalized match text: \(smartBulkNormalizedSimilarMatchText)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
                 Picker("Only rows currently in", selection: $smartBulkSourceCategoryFilter) {
                     Text("Any Category").tag("__any__")
-                    ForEach(visibleCategoryOptions, id: \.self) { category in
+                    ForEach(smartBulkSourceCategoryOptions, id: \.self) { category in
                         Text(category).tag(category)
                     }
                 }
@@ -637,9 +687,61 @@ struct ContentView: View {
                         .textFieldStyle(RoundedBorderTextFieldStyle())
                 }
 
-                Text("Will update \(smartBulkRowsToChangeCount) row(s)")
+                Text("Candidate rows: \(smartBulkCandidateTransactions.count) • Will update \(smartBulkRowsToChangeCount) row(s)")
                     .font(.caption)
                     .foregroundColor(.secondary)
+
+                if smartBulkRowsToChangeCount > 0 {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Live Preview (rows that will change)")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 6) {
+                                ForEach(smartBulkPreviewRows) { tx in
+                                    HStack(alignment: .top, spacing: 8) {
+                                        Text(tx.date.formatted(date: .abbreviated, time: .omitted))
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                            .frame(width: 68, alignment: .leading)
+
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(tx.details)
+                                                .font(.caption)
+                                                .lineLimit(1)
+
+                                            HStack(spacing: 6) {
+                                                Text(tx.category)
+                                                    .font(.caption2)
+                                                    .foregroundColor(.secondary)
+                                                Image(systemName: "arrow.right")
+                                                    .font(.caption2)
+                                                    .foregroundColor(.secondary)
+                                                Text(smartBulkResolvedTargetCategory)
+                                                    .font(.caption2)
+                                                    .fontWeight(.semibold)
+                                            }
+                                        }
+
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 6)
+                                    .background(Color(NSColor.textBackgroundColor).opacity(0.6))
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                }
+                            }
+                        }
+                        .frame(maxHeight: 180)
+
+                        if smartBulkRowsToChangeCount > smartBulkPreviewRows.count {
+                            Text("...and \(smartBulkRowsToChangeCount - smartBulkPreviewRows.count) more row(s)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
 
                 HStack {
                     Button("Cancel") {
@@ -828,7 +930,7 @@ struct ContentView: View {
     }
 
     private var smartBulkButton: some View {
-        Button("Apply Category to Visible Rows...") {
+        Button("Smart Bulk...") {
             openSmartBulkSheet()
         }
         .disabled(filteredTransactions.isEmpty)
@@ -885,6 +987,65 @@ struct ContentView: View {
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
+    private var smartBulkSourceCategoryOptions: [String] {
+        Array(Set(smartBulkScopeTransactions.map { $0.category }))
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    private var singleSelectedTransaction: Transaction? {
+        guard selectedTransactionIDs.count == 1, let id = selectedTransactionIDs.first else { return nil }
+        return transactions.first(where: { $0.id == id })
+    }
+
+    private func normalizedMerchantKey(from details: String) -> String {
+        let upper = details.uppercased()
+        let cleaned = upper
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .joined(separator: " ")
+            .replacingOccurrences(of: "  +", with: " ", options: .regularExpression)
+
+        let stopWords: Set<String> = [
+            "WITHDRAWAL", "DEBIT", "CARD", "CREDIT", "ACH", "TYPE", "PAYMENT", "PAYMENTS",
+            "DEPOSIT", "DIRECT", "ENTRY", "CLASS", "CODE", "TRACE", "NUMBER", "NAME",
+            "FROM", "TO", "WEB", "POS", "TX", "CA", "WA", "CO", "COM", "WWW", "INC"
+        ]
+
+        let tokens = cleaned
+            .split(separator: " ")
+            .map(String.init)
+            .map { token -> String in
+                token
+                    .replacingOccurrences(of: "AMAZONCOM", with: "AMAZON")
+                    .replacingOccurrences(of: "APPLECOM", with: "APPLE")
+            }
+            .map { token in
+                token.replacingOccurrences(of: #"^\d+|\d+$"#, with: "", options: .regularExpression)
+            }
+            .filter { token in
+                let lettersOnly = token.filter(\.isLetter)
+                guard !lettersOnly.isEmpty else { return false }
+                guard lettersOnly.count >= 3 else { return false }
+                return !stopWords.contains(lettersOnly)
+            }
+
+        if tokens.isEmpty { return "" }
+        return Array(tokens.prefix(2)).joined(separator: " ")
+    }
+
+    private func normalizedMerchantMatchText(from raw: String) -> String {
+        normalizedMerchantKey(from: raw)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var smartBulkReferenceMerchantKey: String {
+        guard let tx = singleSelectedTransaction else { return "" }
+        return normalizedMerchantKey(from: tx.details)
+    }
+
+    private var smartBulkNormalizedSimilarMatchText: String {
+        normalizedMerchantMatchText(from: smartBulkSimilarMatchText)
+    }
+
     private var smartBulkResolvedTargetCategory: String {
         if smartBulkTargetCategorySelection == "__add_new__" {
             return smartBulkNewTargetCategoryInput.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -892,10 +1053,32 @@ struct ContentView: View {
         return smartBulkTargetCategorySelection
     }
 
+    private var smartBulkScopeTransactions: [Transaction] {
+        switch smartBulkScope {
+        case .visibleRows:
+            return filteredTransactions
+        case .similarToSelectedRow:
+            let matchText = smartBulkNormalizedSimilarMatchText
+            guard !matchText.isEmpty else { return [] }
+            return searchFilteredTransactions.filter { tx in
+                let candidateKey = normalizedMerchantKey(from: tx.details)
+                guard !candidateKey.isEmpty else { return false }
+                switch smartBulkSimilarMatchMode {
+                case .exact:
+                    return candidateKey == matchText
+                case .startsWith:
+                    return candidateKey.hasPrefix(matchText)
+                case .contains:
+                    return candidateKey.contains(matchText)
+                }
+            }
+        }
+    }
+
     private var smartBulkCandidateTransactions: [Transaction] {
-        let visible = filteredTransactions
-        guard smartBulkSourceCategoryFilter != "__any__" else { return visible }
-        return visible.filter { $0.category == smartBulkSourceCategoryFilter }
+        let scoped = smartBulkScopeTransactions
+        guard smartBulkSourceCategoryFilter != "__any__" else { return scoped }
+        return scoped.filter { $0.category == smartBulkSourceCategoryFilter }
     }
 
     private var smartBulkRowsToChangeCount: Int {
@@ -904,15 +1087,25 @@ struct ContentView: View {
         return smartBulkCandidateTransactions.filter { $0.category != target }.count
     }
 
+    private var smartBulkChangedCandidateTransactions: [Transaction] {
+        let target = smartBulkResolvedTargetCategory
+        guard !target.isEmpty else { return [] }
+        return smartBulkCandidateTransactions.filter { $0.category != target }
+    }
+
+    private var smartBulkPreviewRows: [Transaction] {
+        Array(smartBulkChangedCandidateTransactions.prefix(12))
+    }
+
     // MARK: - Refactored transaction controls bar
     private var transactionControlsBar: some View {
         HStack {
             importButton
+            downloadTemplateButton
             clearButton
             reCategorizeButton
             bulkCategoryButton
             smartBulkButton
-            downloadTemplateButton
             selectedRowsCountText
             Spacer()
             totalIncomeText
@@ -1329,6 +1522,9 @@ struct ContentView: View {
     }
 
     private func openSmartBulkSheet() {
+        smartBulkScope = .visibleRows
+        smartBulkSimilarMatchMode = .exact
+        smartBulkSimilarMatchText = smartBulkReferenceMerchantKey
         smartBulkSourceCategoryFilter = "__any__"
         smartBulkTargetCategorySelection = availableCategories.first ?? "__add_new__"
         smartBulkNewTargetCategoryInput = ""
