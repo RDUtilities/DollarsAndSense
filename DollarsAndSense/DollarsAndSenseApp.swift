@@ -9,28 +9,34 @@ struct HelpView: View {
                 Text("Using AI-Powered Categorization")
                     .font(.title2).bold()
 
-                Text("This app can automatically categorize transactions with OpenAI models. To use this feature:")
+                Text("This app can automatically categorize transactions with OpenAI and Anthropic (Claude) models. To use this feature:")
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("1. Go to \"File > Preferences\".")
                     Text("2. Toggle off Test Mode if you'd like to make real API calls.")
-                    Text("3. Paste in your OpenAI API key. You can get one at:")
+                    Text("3. Paste in your OpenAI and/or Anthropic API key in Preferences:")
                         + Text(" https://platform.openai.com/api-keys").foregroundColor(.blue)
-                    Text("4. Click \"Test API Key\" to verify it.")
+                    Text("   and https://console.anthropic.com/settings/keys").foregroundColor(.blue)
+                    Text("4. Click the provider-specific key test buttons to verify access.")
                     Text("5. When importing CSV, choose your model mode:")
-                    Text("   • Fast & Cheap: gpt-4o-mini")
-                    Text("   • Higher Accuracy: gpt-4.1-mini")
-                    Text("   • Hybrid: 4o-mini first, 4.1-mini fallback")
+                    Text("   • OpenAI Fast: gpt-5.4-nano")
+                    Text("   • OpenAI Higher Accuracy: gpt-5.4-mini")
+                    Text("   • OpenAI Hybrid: gpt-5.4-nano then gpt-5.4-mini")
+                    Text("   • Claude Fast: Haiku 3.5")
+                    Text("   • Claude Higher Accuracy: Sonnet 4")
+                    Text("   • Claude Hybrid: Haiku 3.5 then Sonnet 4")
                 }
 
-                Text("💡 TIP: In Test Mode, the app will not contact OpenAI. This is good for experimenting.")
+                Text("💡 TIP: In Test Mode, the app will not contact OpenAI or Anthropic. This is good for experimenting.")
 
                 Text("💰 Estimated Cost:")
                 Text("Pricing used by this app:")
-                Text("• gpt-4o-mini: $0.15 / 1M input tokens, $0.60 / 1M output tokens")
-                Text("• gpt-4.1-mini: $0.40 / 1M input tokens, $1.60 / 1M output tokens")
+                Text("• gpt-5.4-nano: $0.05 / 1M input tokens, $0.40 / 1M output tokens")
+                Text("• gpt-5.4-mini: $0.25 / 1M input tokens, $2.00 / 1M output tokens")
+                Text("• Claude Haiku 3.5: $0.80 / 1M input tokens, $4.00 / 1M output tokens")
+                Text("• Claude Sonnet 4: $3.00 / 1M input tokens, $15.00 / 1M output tokens")
                 Text("The app tracks token usage and estimates actual cost during imports.")
-                Text("Help copy version: RC3 model selector update (Feb 2026)")
+                Text("Help copy version: RC3.1 multi-provider model update (May 2026)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -59,7 +65,7 @@ struct DollarsAndSenseApp: App {
             CommandGroup(replacing: .appSettings) {
                 Button("Preferences") {
                     let preferencesWindow = NSWindow(
-                        contentRect: NSRect(x: 0, y: 0, width: 420, height: 220),
+                        contentRect: NSRect(x: 0, y: 0, width: 520, height: 360),
                         styleMask: [.titled, .closable],
                         backing: .buffered,
                         defer: false)

@@ -213,9 +213,12 @@ struct SpendingByCategoryChart: View {
 
 struct ContentView: View {
     private enum ImportCategorizationMode {
-        case gpt4oMini
-        case gpt41Mini
-        case hybrid
+        case openAIFast
+        case openAIHighAccuracy
+        case openAIHybrid
+        case claudeFast
+        case claudeHighAccuracy
+        case claudeHybrid
     }
     
     private enum SmartBulkScope: String {
@@ -242,6 +245,7 @@ struct ContentView: View {
     @State private var showExporter: Bool = false
     @State private var apiKeyStatus: String = ""
     @State private var storedApiKey: String = KeychainHelper.shared.retrieve(service: "DollarsAndSense", account: "OpenAIKey") ?? ""
+    @State private var storedAnthropicApiKey: String = KeychainHelper.shared.retrieve(service: "DollarsAndSense", account: "AnthropicKey") ?? ""
     // Removed testMode state; use preferencesModel.testMode instead
     @State private var searchText: String = ""
     @FocusState private var isSearchFieldFocused: Bool
@@ -491,14 +495,23 @@ struct ContentView: View {
             }
         }
         .confirmationDialog("Choose AI Model For This Import", isPresented: $showingImportModelDialog, titleVisibility: .visible) {
-            Button("Fast & Cheap (gpt-4o-mini)") {
-                startImport(using: .gpt4oMini)
+            Button("OpenAI Fast & Cheap (gpt-5.4-nano)") {
+                startImport(using: .openAIFast)
             }
-            Button("Higher Accuracy (gpt-4.1-mini)") {
-                startImport(using: .gpt41Mini)
+            Button("OpenAI Higher Accuracy (gpt-5.4-mini)") {
+                startImport(using: .openAIHighAccuracy)
             }
-            Button("Hybrid (4o-mini then 4.1-mini fallback)") {
-                startImport(using: .hybrid)
+            Button("OpenAI Hybrid (gpt-5.4-nano then gpt-5.4-mini)") {
+                startImport(using: .openAIHybrid)
+            }
+            Button("Claude Fast (Haiku 3.5)") {
+                startImport(using: .claudeFast)
+            }
+            Button("Claude Higher Accuracy (Sonnet 4)") {
+                startImport(using: .claudeHighAccuracy)
+            }
+            Button("Claude Hybrid (Haiku 3.5 then Sonnet 4)") {
+                startImport(using: .claudeHybrid)
             }
             Button("Cancel", role: .cancel) {
                 pendingImportURL = nil
@@ -532,6 +545,9 @@ struct ContentView: View {
             isSearchFieldFocused = true
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RefreshAPIKey"))) { _ in
+            refreshStoredApiKey()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RefreshProviderKeys"))) { _ in
             refreshStoredApiKey()
         }
         .sheet(isPresented: $showingAddCategorySheet) {
@@ -1267,17 +1283,28 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - OpenAI Category Classification
+    // MARK: - AI Category Classification
     private let categorySystemPrompt = "You are a financial assistant. Respond with only the spending category (e.g., Groceries, Restaurants, Gas, Digital Services, Shopping, etc.) based on the transaction description. Do not explain your answer."
+    
+    private enum AIProvider {
+        case openAI
+        case anthropic
+    }
 
-    private func modelPlan(for mode: ImportCategorizationMode) -> (primary: String, fallback: String?) {
+    private func modelPlan(for mode: ImportCategorizationMode) -> (provider: AIProvider, primary: String, fallback: String?) {
         switch mode {
-        case .gpt4oMini:
-            return ("gpt-4o-mini", nil)
-        case .gpt41Mini:
-            return ("gpt-4.1-mini", nil)
-        case .hybrid:
-            return ("gpt-4o-mini", "gpt-4.1-mini")
+        case .openAIFast:
+            return (.openAI, "gpt-5.4-nano", "gpt-4.1-mini")
+        case .openAIHighAccuracy:
+            return (.openAI, "gpt-5.4-mini", "gpt-4.1-mini")
+        case .openAIHybrid:
+            return (.openAI, "gpt-5.4-nano", "gpt-5.4-mini")
+        case .claudeFast:
+            return (.anthropic, "claude-3-5-haiku-20241022", nil)
+        case .claudeHighAccuracy:
+            return (.anthropic, "claude-sonnet-4-20250514", nil)
+        case .claudeHybrid:
+            return (.anthropic, "claude-3-5-haiku-20241022", "claude-sonnet-4-20250514")
         }
     }
 
@@ -1288,7 +1315,15 @@ struct ContentView: View {
         }
 
         let plan = modelPlan(for: mode)
-        classifyCategoryWithModel(description: description, model: plan.primary) { primaryCategory in
+        classifyCategoryWithModel(description: description, provider: plan.provider, model: plan.primary) { primaryCategory in
+            if primaryCategory == nil, let fallbackModel = plan.fallback {
+                print("⚖️ Primary model failed, trying fallback \(fallbackModel) for: \(description)")
+                self.classifyCategoryWithModel(description: description, provider: plan.provider, model: fallbackModel) { fallbackCategory in
+                    completion(fallbackCategory, fallbackCategory == nil ? plan.primary : fallbackModel)
+                }
+                return
+            }
+
             guard
                 let fallbackModel = plan.fallback,
                 self.shouldEscalateToFallback(primaryCategory)
@@ -1298,7 +1333,7 @@ struct ContentView: View {
             }
 
             print("⚖️ Escalating to \(fallbackModel) for: \(description)")
-            self.classifyCategoryWithModel(description: description, model: fallbackModel) { fallbackCategory in
+            self.classifyCategoryWithModel(description: description, provider: plan.provider, model: fallbackModel) { fallbackCategory in
                 if let fallbackCategory, !fallbackCategory.isEmpty {
                     completion(fallbackCategory, fallbackModel)
                 } else {
@@ -1308,7 +1343,16 @@ struct ContentView: View {
         }
     }
 
-    private func classifyCategoryWithModel(description: String, model: String, completion: @escaping (String?) -> Void) {
+    private func classifyCategoryWithModel(description: String, provider: AIProvider, model: String, completion: @escaping (String?) -> Void) {
+        switch provider {
+        case .openAI:
+            classifyCategoryWithOpenAI(description: description, model: model, completion: completion)
+        case .anthropic:
+            classifyCategoryWithAnthropic(description: description, model: model, completion: completion)
+        }
+    }
+    
+    private func classifyCategoryWithOpenAI(description: String, model: String, completion: @escaping (String?) -> Void) {
         let endpoint = URL(string: "https://api.openai.com/v1/chat/completions")!
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -1345,6 +1389,22 @@ struct ContentView: View {
                 completion(nil)
                 return
             }
+            
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                if
+                    let errorJSON = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let errorObj = errorJSON["error"] as? [String: Any],
+                    let message = errorObj["message"] as? String
+                {
+                    print("❌ OpenAI \(model) status \(httpResponse.statusCode): \(message)")
+                } else if let body = String(data: data, encoding: .utf8) {
+                    print("❌ OpenAI \(model) status \(httpResponse.statusCode): \(body)")
+                } else {
+                    print("❌ OpenAI \(model) status \(httpResponse.statusCode)")
+                }
+                completion(nil)
+                return
+            }
 
             do {
                 if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1367,10 +1427,107 @@ struct ContentView: View {
                     }
                     completion(cleaned)
                 } else {
+                    if let body = String(data: data, encoding: .utf8) {
+                        print("❌ OpenAI \(model) unexpected response shape: \(body)")
+                    }
                     completion(nil)
                 }
             } catch {
                 print("❌ Failed to parse API response: \(error)")
+                completion(nil)
+            }
+        }.resume()
+    }
+    
+    private func classifyCategoryWithAnthropic(description: String, model: String, completion: @escaping (String?) -> Void) {
+        let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        let resolvedKey = storedAnthropicApiKey
+        guard !resolvedKey.isEmpty else {
+            print("❌ Missing Anthropic API key, skipping classification.")
+            completion(nil)
+            return
+        }
+        
+        request.addValue(resolvedKey, forHTTPHeaderField: "x-api-key")
+        request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let json: [String: Any] = [
+            "model": model,
+            "system": categorySystemPrompt,
+            "max_tokens": 64,
+            "temperature": 0.3,
+            "messages": [
+                ["role": "user", "content": "Transaction: \(description)"]
+            ]
+        ]
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: json)
+        } catch {
+            print("❌ Failed to encode Anthropic JSON: \(error)")
+            completion(nil)
+            return
+        }
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            guard let data = data, error == nil else {
+                print("❌ Anthropic API call failed: \(error?.localizedDescription ?? "Unknown error")")
+                completion(nil)
+                return
+            }
+            
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                if
+                    let errorJSON = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let errorObj = errorJSON["error"] as? [String: Any],
+                    let message = errorObj["message"] as? String
+                {
+                    print("❌ Anthropic \(model) status \(httpResponse.statusCode): \(message)")
+                } else if let body = String(data: data, encoding: .utf8) {
+                    print("❌ Anthropic \(model) status \(httpResponse.statusCode): \(body)")
+                } else {
+                    print("❌ Anthropic \(model) status \(httpResponse.statusCode)")
+                }
+                completion(nil)
+                return
+            }
+            
+            do {
+                if
+                    let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let contentItems = json["content"] as? [[String: Any]]
+                {
+                    let text = contentItems
+                        .compactMap { item -> String? in
+                            guard let type = item["type"] as? String, type == "text" else { return nil }
+                            return item["text"] as? String
+                        }
+                        .joined(separator: "\n")
+                    
+                    let cleaned = cleanCategoryOutput(text)
+                    if let usage = json["usage"] as? [String: Any],
+                       let promptTokens = tokenCount(from: usage, keys: ["input_tokens", "prompt_tokens"]),
+                       let completionTokens = tokenCount(from: usage, keys: ["output_tokens", "completion_tokens"]) {
+                        updateEstimatedCost(promptTokens: promptTokens, completionTokens: completionTokens, model: model)
+                    } else {
+                        updateEstimatedCost(
+                            promptTokens: estimatedPromptTokens(for: description),
+                            completionTokens: estimatedCompletionTokens(for: cleaned),
+                            model: model
+                        )
+                    }
+                    completion(cleaned.isEmpty ? nil : cleaned)
+                } else {
+                    if let body = String(data: data, encoding: .utf8) {
+                        print("❌ Anthropic \(model) unexpected response shape: \(body)")
+                    }
+                    completion(nil)
+                }
+            } catch {
+                print("❌ Failed to parse Anthropic response: \(error)")
                 completion(nil)
             }
         }.resume()
@@ -1398,12 +1555,16 @@ struct ContentView: View {
 
     private func modelPricing(for model: String) -> (inputPerMillion: Double, outputPerMillion: Double) {
         switch model {
-        case "gpt-4.1-mini":
-            return (0.40, 1.60)
-        case "gpt-4o-mini":
-            return (0.15, 0.60)
+        case "gpt-5.4-mini":
+            return (0.25, 2.00)
+        case "gpt-5.4-nano":
+            return (0.05, 0.40)
+        case "claude-sonnet-4-20250514":
+            return (3.00, 15.00)
+        case "claude-3-5-haiku-20241022":
+            return (0.80, 4.00)
         default:
-            return (0.15, 0.60)
+            return (0.25, 2.00)
         }
     }
 
@@ -1464,6 +1625,7 @@ struct ContentView: View {
     // MARK: - Refresh stored API key from Keychain
     private func refreshStoredApiKey() {
         storedApiKey = KeychainHelper.shared.retrieve(service: "DollarsAndSense", account: "OpenAIKey") ?? ""
+        storedAnthropicApiKey = KeychainHelper.shared.retrieve(service: "DollarsAndSense", account: "AnthropicKey") ?? ""
     }
 
     private func loadTransactions() {
@@ -1559,7 +1721,6 @@ DemoAccount,2025-04-27,WITHDRAWAL ATM TX,,Debit,40.00
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         let resolvedKey = storedApiKey
-        print("🔐 API Key from storage: \(resolvedKey)")
         request.addValue("Bearer \(resolvedKey)", forHTTPHeaderField: "Authorization")
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
 
@@ -1567,7 +1728,7 @@ DemoAccount,2025-04-27,WITHDRAWAL ATM TX,,Debit,40.00
             ["role": "user", "content": "Say OK."]
         ]
         let json: [String: Any] = [
-            "model": "gpt-4o-mini",
+            "model": "gpt-5.4-mini",
             "messages": messages,
             "temperature": 0
         ]
@@ -1628,7 +1789,9 @@ struct URLDocument: FileDocument {
 // MARK: - PreferencesView for Test Mode and API Key Testing
 struct PreferencesView: View {
     @State private var storedApiKey: String = KeychainHelper.shared.retrieve(service: "DollarsAndSense", account: "OpenAIKey") ?? ""
-    @State private var apiKeyStatus: String = ""
+    @State private var storedAnthropicApiKey: String = KeychainHelper.shared.retrieve(service: "DollarsAndSense", account: "AnthropicKey") ?? ""
+    @State private var openAIKeyStatus: String = ""
+    @State private var anthropicKeyStatus: String = ""
     @EnvironmentObject var preferencesModel: AppPreferencesModel
 
     var body: some View {
@@ -1643,21 +1806,43 @@ struct PreferencesView: View {
                 .textFieldStyle(RoundedBorderTextFieldStyle())
                 .onChange(of: storedApiKey) { newValue in
                     KeychainHelper.shared.save(newValue, service: "DollarsAndSense", account: "OpenAIKey")
-                    NotificationCenter.default.post(name: NSNotification.Name("RefreshAPIKey"), object: nil)
+                    NotificationCenter.default.post(name: NSNotification.Name("RefreshProviderKeys"), object: nil)
                 }
 
-            Button("Test API Key") {
-                verifyAPIKey()
+            HStack(spacing: 10) {
+                Button("Test OpenAI Key") {
+                    verifyOpenAIKey()
+                }
+                .buttonStyle(.bordered)
+                
+                if !openAIKeyStatus.isEmpty {
+                    Text(openAIKeyStatus)
+                        .foregroundColor(openAIKeyStatus.contains("✅") ? .green : .red)
+                        .font(.caption)
+                }
             }
-            .buttonStyle(.bordered)
 
-            if !apiKeyStatus.isEmpty {
-                Text(apiKeyStatus)
-                    .foregroundColor(apiKeyStatus.contains("✅") ? .green : .red)
-                    .font(.caption)
+            SecureField("Anthropic API Key (Claude)", text: $storedAnthropicApiKey)
+                .textFieldStyle(RoundedBorderTextFieldStyle())
+                .onChange(of: storedAnthropicApiKey) { newValue in
+                    KeychainHelper.shared.save(newValue, service: "DollarsAndSense", account: "AnthropicKey")
+                    NotificationCenter.default.post(name: NSNotification.Name("RefreshProviderKeys"), object: nil)
+                }
+            
+            HStack(spacing: 10) {
+                Button("Test Anthropic Key") {
+                    verifyAnthropicKey()
+                }
+                .buttonStyle(.bordered)
+                
+                if !anthropicKeyStatus.isEmpty {
+                    Text(anthropicKeyStatus)
+                        .foregroundColor(anthropicKeyStatus.contains("✅") ? .green : .red)
+                        .font(.caption)
+                }
             }
 
-            Text(String(format: "Estimated OpenAI cost: $%.6f", preferencesModel.estimatedCost))
+            Text(String(format: "Estimated AI cost: $%.6f", preferencesModel.estimatedCost))
                 .font(.headline)
                 .fontWeight(.semibold)
                 .foregroundColor(.gray)
@@ -1665,19 +1850,25 @@ struct PreferencesView: View {
             Spacer()
         }
         .padding()
-        .frame(width: 400, height: 200)
+        .frame(width: 500, height: 320)
     }
 
-    private func verifyAPIKey() {
+    private func verifyOpenAIKey() {
         let endpoint = URL(string: "https://api.openai.com/v1/chat/completions")!
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        let resolvedKey = storedApiKey
+        let resolvedKey = storedApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !resolvedKey.isEmpty else {
+            openAIKeyStatus = "❌ OpenAI key is empty"
+            return
+        }
         request.addValue("Bearer \(resolvedKey)", forHTTPHeaderField: "Authorization")
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
 
         let messages = [["role": "user", "content": "Say OK."]]
         let json: [String: Any] = [
+            // Use a broadly available model to validate key credentials separately
+            // from newer model-access checks during import.
             "model": "gpt-4o-mini",
             "messages": messages,
             "temperature": 0
@@ -1686,14 +1877,14 @@ struct PreferencesView: View {
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: json)
         } catch {
-            apiKeyStatus = "❌ Failed to encode request"
+            openAIKeyStatus = "❌ Failed to encode request"
             return
         }
 
         URLSession.shared.dataTask(with: request) { data, response, error in
             guard let _ = data, error == nil else {
                 DispatchQueue.main.async {
-                    apiKeyStatus = "❌ Network error: \(error?.localizedDescription ?? "Unknown error")"
+                    openAIKeyStatus = "❌ Network error: \(error?.localizedDescription ?? "Unknown error")"
                 }
                 return
             }
@@ -1701,18 +1892,69 @@ struct PreferencesView: View {
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
                 DispatchQueue.main.async {
                     if httpResponse.statusCode == 429 {
-                        apiKeyStatus = "❌ Rate limit hit (429). Try again later."
+                        openAIKeyStatus = "❌ Rate limit hit (429). Try again later."
                     } else if httpResponse.statusCode == 401 {
-                        apiKeyStatus = "❌ Invalid API Key (Status 401)"
+                        openAIKeyStatus = "❌ Invalid API Key (Status 401)"
+                    } else if httpResponse.statusCode == 400 {
+                        openAIKeyStatus = "❌ Bad request (400). Check request/model settings."
                     } else {
-                        apiKeyStatus = "❌ API Error (Status \(httpResponse.statusCode))"
+                        openAIKeyStatus = "❌ API Error (Status \(httpResponse.statusCode))"
                     }
                 }
                 return
             }
 
             DispatchQueue.main.async {
-                apiKeyStatus = "✅ API Key is valid!"
+                openAIKeyStatus = "✅ OpenAI key is valid!"
+            }
+        }.resume()
+    }
+    
+    private func verifyAnthropicKey() {
+        let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        let resolvedKey = storedAnthropicApiKey
+        request.addValue(resolvedKey, forHTTPHeaderField: "x-api-key")
+        request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let json: [String: Any] = [
+            "model": "claude-3-5-haiku-20241022",
+            "max_tokens": 16,
+            "messages": [["role": "user", "content": "Say OK."]]
+        ]
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: json)
+        } catch {
+            anthropicKeyStatus = "❌ Failed to encode request"
+            return
+        }
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            guard let _ = data, error == nil else {
+                DispatchQueue.main.async {
+                    anthropicKeyStatus = "❌ Network error: \(error?.localizedDescription ?? "Unknown error")"
+                }
+                return
+            }
+            
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                DispatchQueue.main.async {
+                    if httpResponse.statusCode == 429 {
+                        anthropicKeyStatus = "❌ Rate limit hit (429). Try again later."
+                    } else if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+                        anthropicKeyStatus = "❌ Invalid API Key (Status \(httpResponse.statusCode))"
+                    } else {
+                        anthropicKeyStatus = "❌ API Error (Status \(httpResponse.statusCode))"
+                    }
+                }
+                return
+            }
+            
+            DispatchQueue.main.async {
+                anthropicKeyStatus = "✅ Anthropic key is valid!"
             }
         }.resume()
     }
