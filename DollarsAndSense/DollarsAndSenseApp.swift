@@ -17,26 +17,28 @@ struct HelpView: View {
                     Text("3. Paste in your OpenAI and/or Anthropic API key in Preferences:")
                         + Text(" https://platform.openai.com/api-keys").foregroundColor(.blue)
                     Text("   and https://console.anthropic.com/settings/keys").foregroundColor(.blue)
-                    Text("4. Click the provider-specific key test buttons to verify access.")
-                    Text("5. When importing CSV, choose your model mode:")
-                    Text("   • OpenAI Fast: gpt-5.4-nano")
-                    Text("   • OpenAI Higher Accuracy: gpt-5.4-mini")
-                    Text("   • OpenAI Hybrid: gpt-5.4-nano then gpt-5.4-mini")
-                    Text("   • Claude Fast: Haiku 3.5")
-                    Text("   • Claude Higher Accuracy: Sonnet 4")
-                    Text("   • Claude Hybrid: Haiku 3.5 then Sonnet 4")
+                    Text("4. Choose your default AI model in Preferences.")
+                    Text("5. Click \"Test Selected Model\" to verify the exact provider/model you plan to use.")
+                    Text("6. When importing CSV, use your default model or choose a one-time override:")
+                    Text("   • OpenAI Reliable: gpt-4.1-mini")
+                    Text("   • OpenAI Budget: gpt-4.1-nano")
+                    Text("   • OpenAI GPT-5 Fast: gpt-5-nano")
+                    Text("   • OpenAI GPT-5 Higher Accuracy: gpt-5-mini")
+                    Text("   • OpenAI GPT-5 Hybrid: gpt-5-nano then gpt-5-mini")
+                    Text("   • Claude Sonnet: claude-sonnet-4-6")
                 }
 
                 Text("💡 TIP: In Test Mode, the app will not contact OpenAI or Anthropic. This is good for experimenting.")
 
                 Text("💰 Estimated Cost:")
                 Text("Pricing used by this app:")
-                Text("• gpt-5.4-nano: $0.05 / 1M input tokens, $0.40 / 1M output tokens")
-                Text("• gpt-5.4-mini: $0.25 / 1M input tokens, $2.00 / 1M output tokens")
-                Text("• Claude Haiku 3.5: $0.80 / 1M input tokens, $4.00 / 1M output tokens")
-                Text("• Claude Sonnet 4: $3.00 / 1M input tokens, $15.00 / 1M output tokens")
+                Text("• gpt-4.1-mini: $0.40 / 1M input tokens, $1.60 / 1M output tokens")
+                Text("• gpt-4.1-nano: $0.10 / 1M input tokens, $0.40 / 1M output tokens")
+                Text("• gpt-5-nano: $0.05 / 1M input tokens, $0.40 / 1M output tokens")
+                Text("• gpt-5-mini: $0.25 / 1M input tokens, $2.00 / 1M output tokens")
+                Text("• Claude Sonnet: $3.00 / 1M input tokens, $15.00 / 1M output tokens")
                 Text("The app tracks token usage and estimates actual cost during imports.")
-                Text("Help copy version: RC3.1 multi-provider model update (May 2026)")
+                Text("Help copy version: RC3.2 Preferences model selector (June 2026)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -65,7 +67,7 @@ struct DollarsAndSenseApp: App {
             CommandGroup(replacing: .appSettings) {
                 Button("Preferences") {
                     let preferencesWindow = NSWindow(
-                        contentRect: NSRect(x: 0, y: 0, width: 520, height: 360),
+                        contentRect: NSRect(x: 0, y: 0, width: 580, height: 470),
                         styleMask: [.titled, .closable],
                         backing: .buffered,
                         defer: false)

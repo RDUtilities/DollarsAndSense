@@ -212,15 +212,6 @@ struct SpendingByCategoryChart: View {
 
 
 struct ContentView: View {
-    private enum ImportCategorizationMode {
-        case openAIFast
-        case openAIHighAccuracy
-        case openAIHybrid
-        case claudeFast
-        case claudeHighAccuracy
-        case claudeHybrid
-    }
-    
     private enum SmartBulkScope: String {
         case visibleRows
         case similarToSelectedRow
@@ -489,29 +480,36 @@ struct ContentView: View {
             do {
                 guard let selectedFile = try result.get().first else { return }
                 pendingImportURL = selectedFile
-                showingImportModelDialog = true
+                if preferencesModel.askForModelOnImport {
+                    showingImportModelDialog = true
+                } else {
+                    startImport(using: preferencesModel.selectedImportMode)
+                }
             } catch {
                 print("Failed to read file: \(error.localizedDescription)")
             }
         }
         .confirmationDialog("Choose AI Model For This Import", isPresented: $showingImportModelDialog, titleVisibility: .visible) {
-            Button("OpenAI Fast & Cheap (gpt-5.4-nano)") {
+            Button("Use Preferences Default: \(preferencesModel.selectedImportMode.pickerLabel)") {
+                startImport(using: preferencesModel.selectedImportMode)
+            }
+            Button("\(ImportCategorizationMode.openAIReliable.displayName) (\(ImportCategorizationMode.openAIReliable.modelSummary))") {
+                startImport(using: .openAIReliable)
+            }
+            Button("\(ImportCategorizationMode.openAIBudget.displayName) (\(ImportCategorizationMode.openAIBudget.modelSummary))") {
+                startImport(using: .openAIBudget)
+            }
+            Button("\(ImportCategorizationMode.openAIFast.displayName) (\(ImportCategorizationMode.openAIFast.modelSummary))") {
                 startImport(using: .openAIFast)
             }
-            Button("OpenAI Higher Accuracy (gpt-5.4-mini)") {
+            Button("\(ImportCategorizationMode.openAIHighAccuracy.displayName) (\(ImportCategorizationMode.openAIHighAccuracy.modelSummary))") {
                 startImport(using: .openAIHighAccuracy)
             }
-            Button("OpenAI Hybrid (gpt-5.4-nano then gpt-5.4-mini)") {
+            Button("\(ImportCategorizationMode.openAIHybrid.displayName) (\(ImportCategorizationMode.openAIHybrid.modelSummary))") {
                 startImport(using: .openAIHybrid)
             }
-            Button("Claude Fast (Haiku 3.5)") {
-                startImport(using: .claudeFast)
-            }
-            Button("Claude Higher Accuracy (Sonnet 4)") {
+            Button("\(ImportCategorizationMode.claudeHighAccuracy.displayName) (\(ImportCategorizationMode.claudeHighAccuracy.modelSummary))") {
                 startImport(using: .claudeHighAccuracy)
-            }
-            Button("Claude Hybrid (Haiku 3.5 then Sonnet 4)") {
-                startImport(using: .claudeHybrid)
             }
             Button("Cancel", role: .cancel) {
                 pendingImportURL = nil
@@ -1210,7 +1208,7 @@ struct ContentView: View {
 
             let delimiterChar = delimiter.first ?? ","
             let csv = try CSV<Named>(string: content, delimiter: CSVDelimiter(unicodeScalarLiteral: delimiterChar))
-            // var importedItems: [Transaction] = []
+            var importedItems: [(transaction: Transaction, details: String)] = []
             var errors: [String] = []
 
             for (index, row) in csv.rows.enumerated() {
@@ -1239,47 +1237,56 @@ struct ContentView: View {
 
                 let signedAmount = type.contains("debit") ? -amount : amount
                 let newTransaction = Transaction(date: date, details: details, amount: signedAmount, category: "Uncategorized")
-                classifyCategory(for: details, mode: mode) { category, modelUsed in
-                    DispatchQueue.main.async {
-                        if let category = category, !category.isEmpty {
-                            newTransaction.category = category
-                            newTransaction.source = .ai
-                            newTransaction.categorizedByModel = modelUsed
-                            categorySuggestions[details] = category
-                        }
-                        modelContext.insert(newTransaction)
-                        self.transactions.append(newTransaction)
-                        do {
-                            try modelContext.save()
-                        } catch {
-                            errors.append("❗️ Failed to save transaction: \(error.localizedDescription)")
-                        }
-                    }
-                }
+                importedItems.append((newTransaction, details))
             }
-
-            // The following lines are now redundant and removed/commented out:
-            /*
-            for tx in importedItems {
-                modelContext.insert(tx)
-            }
-            do {
-                try modelContext.save()
-            } catch {
-                errors.append("❗️ Failed to save transactions: \(error.localizedDescription)")
-            }
-            self.transactions.append(contentsOf: importedItems)
-            */
 
             if !errors.isEmpty {
                 self.importErrors = errors
                 self.showingImportErrorSheet = true
-            } else {
-                print("✅ Successfully imported transactions.")
             }
+
+            importTransactionsSequentially(importedItems, mode: mode)
 
         } catch {
             print("❌ CSV parsing failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func importTransactionsSequentially(
+        _ items: [(transaction: Transaction, details: String)],
+        mode: ImportCategorizationMode,
+        index: Int = 0
+    ) {
+        guard index < items.count else {
+            print("✅ Successfully imported \(items.count) transactions.")
+            return
+        }
+
+        let item = items[index]
+        classifyCategory(for: item.details, mode: mode) { category, modelUsed in
+            DispatchQueue.main.async {
+                if let category = category, !category.isEmpty {
+                    item.transaction.category = category
+                    item.transaction.source = .ai
+                    item.transaction.categorizedByModel = modelUsed
+                    categorySuggestions[item.details] = category
+                }
+
+                modelContext.insert(item.transaction)
+                self.transactions.append(item.transaction)
+
+                do {
+                    try modelContext.save()
+                } catch {
+                    print("❌ Failed to save transaction: \(error.localizedDescription)")
+                }
+
+                let provider = modelPlan(for: mode).provider
+                let delay: TimeInterval = provider == .anthropic ? 0.45 : 0.15
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    importTransactionsSequentially(items, mode: mode, index: index + 1)
+                }
+            }
         }
     }
 
@@ -1293,18 +1300,24 @@ struct ContentView: View {
 
     private func modelPlan(for mode: ImportCategorizationMode) -> (provider: AIProvider, primary: String, fallback: String?) {
         switch mode {
+        case .openAIReliable:
+            return (.openAI, "gpt-4.1-mini", nil)
+        case .openAIBudget:
+            return (.openAI, "gpt-4.1-nano", nil)
         case .openAIFast:
-            return (.openAI, "gpt-5.4-nano", "gpt-4.1-mini")
+            return (.openAI, "gpt-5-nano", "gpt-4.1-mini")
         case .openAIHighAccuracy:
-            return (.openAI, "gpt-5.4-mini", "gpt-4.1-mini")
+            return (.openAI, "gpt-5-mini", "gpt-4.1-mini")
         case .openAIHybrid:
-            return (.openAI, "gpt-5.4-nano", "gpt-5.4-mini")
+            return (.openAI, "gpt-5-nano", "gpt-5-mini")
         case .claudeFast:
-            return (.anthropic, "claude-3-5-haiku-20241022", nil)
+            return (.anthropic, "claude-sonnet-4-6", nil)
         case .claudeHighAccuracy:
-            return (.anthropic, "claude-sonnet-4-20250514", nil)
+            return (.anthropic, "claude-sonnet-4-6", nil)
         case .claudeHybrid:
-            return (.anthropic, "claude-3-5-haiku-20241022", "claude-sonnet-4-20250514")
+            return (.anthropic, "claude-sonnet-4-6", nil)
+        case .claudeOpus:
+            return (.anthropic, "claude-sonnet-4-6", nil)
         }
     }
 
@@ -1352,7 +1365,7 @@ struct ContentView: View {
         }
     }
     
-    private func classifyCategoryWithOpenAI(description: String, model: String, completion: @escaping (String?) -> Void) {
+    private func classifyCategoryWithOpenAI(description: String, model: String, attempt: Int = 0, completion: @escaping (String?) -> Void) {
         let endpoint = URL(string: "https://api.openai.com/v1/chat/completions")!
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -1369,11 +1382,13 @@ struct ContentView: View {
             ["role": "system", "content": categorySystemPrompt],
             ["role": "user", "content": "Transaction: \(description)"]
         ]
-        let json: [String: Any] = [
+        var json: [String: Any] = [
             "model": model,
-            "messages": messages,
-            "temperature": 0.3
+            "messages": messages
         ]
+        if !model.hasPrefix("gpt-5") {
+            json["temperature"] = 0.3
+        }
 
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: json)
@@ -1391,6 +1406,15 @@ struct ContentView: View {
             }
             
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                if httpResponse.statusCode == 429, attempt < 2 {
+                    let delay = self.retryDelay(from: httpResponse, attempt: attempt)
+                    print("⏳ OpenAI \(model) rate limited. Retrying in \(delay)s.")
+                    DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
+                        self.classifyCategoryWithOpenAI(description: description, model: model, attempt: attempt + 1, completion: completion)
+                    }
+                    return
+                }
+
                 if
                     let errorJSON = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                     let errorObj = errorJSON["error"] as? [String: Any],
@@ -1439,7 +1463,7 @@ struct ContentView: View {
         }.resume()
     }
     
-    private func classifyCategoryWithAnthropic(description: String, model: String, completion: @escaping (String?) -> Void) {
+    private func classifyCategoryWithAnthropic(description: String, model: String, attempt: Int = 0, completion: @escaping (String?) -> Void) {
         let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -1480,6 +1504,15 @@ struct ContentView: View {
             }
             
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                if httpResponse.statusCode == 429, attempt < 2 {
+                    let delay = self.retryDelay(from: httpResponse, attempt: attempt)
+                    print("⏳ Anthropic \(model) rate limited. Retrying in \(delay)s.")
+                    DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
+                        self.classifyCategoryWithAnthropic(description: description, model: model, attempt: attempt + 1, completion: completion)
+                    }
+                    return
+                }
+
                 if
                     let errorJSON = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                     let errorObj = errorJSON["error"] as? [String: Any],
@@ -1533,6 +1566,17 @@ struct ContentView: View {
         }.resume()
     }
 
+    private func retryDelay(from response: HTTPURLResponse, attempt: Int) -> TimeInterval {
+        if
+            let retryAfter = response.value(forHTTPHeaderField: "Retry-After"),
+            let seconds = TimeInterval(retryAfter)
+        {
+            return min(max(seconds, 1), 20)
+        }
+
+        return min(pow(2.0, Double(attempt + 1)), 8)
+    }
+
     private func updateEstimatedCost(promptTokens: Int, completionTokens: Int, model: String) {
         let pricing = modelPricing(for: model)
         let inputCost = (Double(promptTokens) / 1_000_000.0) * pricing.inputPerMillion
@@ -1555,14 +1599,18 @@ struct ContentView: View {
 
     private func modelPricing(for model: String) -> (inputPerMillion: Double, outputPerMillion: Double) {
         switch model {
-        case "gpt-5.4-mini":
+        case "gpt-5-mini":
             return (0.25, 2.00)
-        case "gpt-5.4-nano":
+        case "gpt-5-nano":
             return (0.05, 0.40)
-        case "claude-sonnet-4-20250514":
+        case "gpt-4.1-mini":
+            return (0.40, 1.60)
+        case "gpt-4.1-nano":
+            return (0.10, 0.40)
+        case "gpt-4o-mini":
+            return (0.15, 0.60)
+        case "claude-sonnet-4-20250514", "claude-sonnet-4-6":
             return (3.00, 15.00)
-        case "claude-3-5-haiku-20241022":
-            return (0.80, 4.00)
         default:
             return (0.25, 2.00)
         }
@@ -1728,7 +1776,7 @@ DemoAccount,2025-04-27,WITHDRAWAL ATM TX,,Debit,40.00
             ["role": "user", "content": "Say OK."]
         ]
         let json: [String: Any] = [
-            "model": "gpt-5.4-mini",
+            "model": "gpt-5-mini",
             "messages": messages,
             "temperature": 0
         ]
@@ -1797,10 +1845,32 @@ struct PreferencesView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Toggle("Test Mode (no API calls)", isOn: $preferencesModel.testMode)
-                .onChange(of: preferencesModel.testMode) { newValue in
-                    KeychainHelper.shared.save(newValue ? "true" : "false", service: "DollarsAndSense", account: "TestMode")
-                }
                 .toggleStyle(SwitchToggleStyle())
+
+            GroupBox("Default AI Model") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Picker("Model", selection: $preferencesModel.selectedImportMode) {
+                        ForEach(ImportCategorizationMode.allCases) { mode in
+                            Text(mode.pickerLabel).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
+                    Toggle("Ask me to choose during each CSV import", isOn: $preferencesModel.askForModelOnImport)
+
+                    HStack(spacing: 10) {
+                        Button("Test Selected Model") {
+                            verifySelectedModel()
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Text(preferencesModel.selectedImportMode.isOpenAI ? "Uses OpenAI key" : "Uses Anthropic key")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
 
             SecureField("OpenAI API Key", text: $storedApiKey)
                 .textFieldStyle(RoundedBorderTextFieldStyle())
@@ -1811,7 +1881,7 @@ struct PreferencesView: View {
 
             HStack(spacing: 10) {
                 Button("Test OpenAI Key") {
-                    verifyOpenAIKey()
+                    verifyOpenAIKey(model: openAITestModelForSelectedMode(), statusPrefix: "OpenAI")
                 }
                 .buttonStyle(.bordered)
                 
@@ -1831,7 +1901,7 @@ struct PreferencesView: View {
             
             HStack(spacing: 10) {
                 Button("Test Anthropic Key") {
-                    verifyAnthropicKey()
+                    verifyAnthropicKey(model: anthropicTestModelForSelectedMode(), statusPrefix: "Anthropic")
                 }
                 .buttonStyle(.bordered)
                 
@@ -1850,10 +1920,44 @@ struct PreferencesView: View {
             Spacer()
         }
         .padding()
-        .frame(width: 500, height: 320)
+        .frame(width: 560, height: 430)
     }
 
-    private func verifyOpenAIKey() {
+    private func verifySelectedModel() {
+        if preferencesModel.selectedImportMode.isOpenAI {
+            verifyOpenAIKey(model: openAITestModelForSelectedMode(), statusPrefix: "Selected OpenAI")
+        } else {
+            verifyAnthropicKey(model: anthropicTestModelForSelectedMode(), statusPrefix: "Selected Claude")
+        }
+    }
+
+    private func openAITestModelForSelectedMode() -> String {
+        switch preferencesModel.selectedImportMode {
+        case .openAIReliable:
+            return "gpt-4.1-mini"
+        case .openAIBudget:
+            return "gpt-4.1-nano"
+        case .openAIFast, .openAIHybrid:
+            return "gpt-5-nano"
+        case .openAIHighAccuracy:
+            return "gpt-5-mini"
+        case .claudeFast, .claudeHighAccuracy, .claudeHybrid, .claudeOpus:
+            return "gpt-4.1-mini"
+        }
+    }
+
+    private func anthropicTestModelForSelectedMode() -> String {
+        switch preferencesModel.selectedImportMode {
+        case .claudeFast, .claudeHighAccuracy, .claudeHybrid:
+            return "claude-sonnet-4-6"
+        case .claudeOpus:
+            return "claude-sonnet-4-6"
+        case .openAIReliable, .openAIBudget, .openAIFast, .openAIHighAccuracy, .openAIHybrid:
+            return "claude-sonnet-4-6"
+        }
+    }
+
+    private func verifyOpenAIKey(model: String, statusPrefix: String) {
         let endpoint = URL(string: "https://api.openai.com/v1/chat/completions")!
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -1866,13 +1970,13 @@ struct PreferencesView: View {
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
 
         let messages = [["role": "user", "content": "Say OK."]]
-        let json: [String: Any] = [
-            // Use a broadly available model to validate key credentials separately
-            // from newer model-access checks during import.
-            "model": "gpt-4o-mini",
-            "messages": messages,
-            "temperature": 0
+        var json: [String: Any] = [
+            "model": model,
+            "messages": messages
         ]
+        if !model.hasPrefix("gpt-5") {
+            json["temperature"] = 0
+        }
 
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: json)
@@ -1892,35 +1996,39 @@ struct PreferencesView: View {
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
                 DispatchQueue.main.async {
                     if httpResponse.statusCode == 429 {
-                        openAIKeyStatus = "❌ Rate limit hit (429). Try again later."
+                        openAIKeyStatus = "❌ \(statusPrefix) \(model) limit hit (429)"
                     } else if httpResponse.statusCode == 401 {
-                        openAIKeyStatus = "❌ Invalid API Key (Status 401)"
+                        openAIKeyStatus = "❌ \(statusPrefix) invalid key (401)"
                     } else if httpResponse.statusCode == 400 {
-                        openAIKeyStatus = "❌ Bad request (400). Check request/model settings."
+                        openAIKeyStatus = "❌ \(statusPrefix) \(model) bad request (400)"
                     } else {
-                        openAIKeyStatus = "❌ API Error (Status \(httpResponse.statusCode))"
+                        openAIKeyStatus = "❌ \(statusPrefix) \(model) error \(httpResponse.statusCode)"
                     }
                 }
                 return
             }
 
             DispatchQueue.main.async {
-                openAIKeyStatus = "✅ OpenAI key is valid!"
+                openAIKeyStatus = "✅ \(statusPrefix) \(model) works"
             }
         }.resume()
     }
     
-    private func verifyAnthropicKey() {
+    private func verifyAnthropicKey(model: String, statusPrefix: String) {
         let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        let resolvedKey = storedAnthropicApiKey
+        let resolvedKey = storedAnthropicApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !resolvedKey.isEmpty else {
+            anthropicKeyStatus = "❌ Anthropic key is empty"
+            return
+        }
         request.addValue(resolvedKey, forHTTPHeaderField: "x-api-key")
         request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         
         let json: [String: Any] = [
-            "model": "claude-3-5-haiku-20241022",
+            "model": model,
             "max_tokens": 16,
             "messages": [["role": "user", "content": "Say OK."]]
         ]
@@ -1943,18 +2051,18 @@ struct PreferencesView: View {
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
                 DispatchQueue.main.async {
                     if httpResponse.statusCode == 429 {
-                        anthropicKeyStatus = "❌ Rate limit hit (429). Try again later."
+                        anthropicKeyStatus = "❌ \(statusPrefix) \(model) limit hit (429)"
                     } else if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
-                        anthropicKeyStatus = "❌ Invalid API Key (Status \(httpResponse.statusCode))"
+                        anthropicKeyStatus = "❌ \(statusPrefix) invalid key (\(httpResponse.statusCode))"
                     } else {
-                        anthropicKeyStatus = "❌ API Error (Status \(httpResponse.statusCode))"
+                        anthropicKeyStatus = "❌ \(statusPrefix) \(model) error \(httpResponse.statusCode)"
                     }
                 }
                 return
             }
             
             DispatchQueue.main.async {
-                anthropicKeyStatus = "✅ Anthropic key is valid!"
+                anthropicKeyStatus = "✅ \(statusPrefix) \(model) works"
             }
         }.resume()
     }
